@@ -1,0 +1,275 @@
+--[[
+[================]
+C++ Programmer & Author: Werasik2aa
+Project Creator: Monokit
+Description: Patch for client things. Like spawn quest item or block spawn some objects.
+Here patches only for client! Which not hosted game!
+[================]
+--]]
+local GameManager = SteamGameManager()
+local function NOP() end
+local function RETURN_TRUE() return true end
+local function RETURN_FALSE() return false end
+local function RETURN_NIL() return nil end
+
+function Patch()
+    log("[Client] Patching game for some things dynamically...")
+    
+    if not _G.RegisterPatch then
+        log("![Client] ERROR: RegisterPatch function not found!")
+        return
+    end
+
+    RegisterPatch(_G, "alife_create", function (sec, pos, lid, gid, id, state)
+        if id or string.match(sec, "level_changer") then
+            return alife_create_local(sec, pos, lid, gid, id, state)
+        end
+    end)
+
+    if alife() then
+        RegisterPatch(alife(), "register", function(self, se)
+            callstack()
+            log("!NO WAY!")
+        end)
+        RegisterPatch(alife(), "create", function(self, se)
+            callstack()
+            log("!NO WAY!")
+        end)
+    end
+
+    RegisterPatch(item_parts, "evaluate_parts", function (obj)
+        local para = para and obj:parent()
+        if not item_parts.get_parts_con(obj, obj:id(), false) and (not para or para:id() == AC_ID) then
+            local orig = _G.MP_Originals[item_parts]["evaluate_parts"]
+            if orig and orig ~= "NIL" then
+                return orig(obj)
+            end
+        end
+    end)
+
+    RegisterPatch(death_manager, "create_release_item", NOP)
+    RegisterPatch(death_manager, "create_item", NOP)
+    RegisterPatch(death_manager, "try_spawn_ammo", NOP)
+    RegisterPatch(death_manager, "spawn_cosmetics", NOP)
+    RegisterPatch(death_manager, "set_weapon_drop_condition", NOP)
+    RegisterPatch(death_manager, "keep_item", RETURN_FALSE)
+    RegisterPatch(treasure_manager, "try_spawn_treasure", NOP)
+    RegisterPatch(guaranteed_loot, "check", NOP)
+    RegisterPatch(guaranteed_loot, "npc_on_use", NOP)
+    RegisterPatch(guaranteed_loot, "on_game_start", NOP)
+    RegisterPatch(xr_logic, "create_items", NOP)
+    RegisterPatch(xr_logic, "spawn_items", NOP)
+
+    RegisterPatch(ui_debug_launcher, "release_obj", function()
+        local o1 = level.get_target_obj()
+        if not o1 then return end
+        local name = o1:name()
+        alife_release_client_id(o1:id())
+        printf('-[%s] vanished', name)
+    end)
+
+    if task_manager and task_manager.CRandomTask then
+        RegisterPatch(task_manager.CRandomTask, "task_fail", NOP)
+    end
+
+    RegisterPatch(game_setup, "try_spawn_world_item", NOP)
+    RegisterPatch(ph_door, "try_to_open_door", NOP)
+    RegisterPatch(ph_door, "try_to_close_door", NOP)
+    RegisterPatch(task_functor, "smart_control_task_target_functor", NOP)
+    RegisterPatch(tasks_clear_map, "mutants_in_map", NOP)
+    RegisterPatch(state_mgr_direction, "turn", NOP)
+    RegisterPatch(state_mgr_direction, "look_at_object", NOP)
+    RegisterPatch(xr_effects, "set_weather", NOP)
+    RegisterPatch(xr_effects, "setup_companion_task", NOP)
+    RegisterPatch(xr_effects, "spawn_corpse", NOP)
+    RegisterPatch(utils_obj, "create_squad", NOP)
+
+    RegisterPatch(bind_anomaly_field, "save_state", function (m_data) m_data.dyn_anomalies = {} end)
+    RegisterPatch(bind_anomaly_field, "load_state", NOP)
+    RegisterPatch(bind_anomaly_field, "dyn_anomalies_refresh", NOP)
+    RegisterPatch(bind_anomaly_field, "dyn_anomalies_suffle", NOP)
+    RegisterPatch(bind_anomaly_field, "dyn_anomalies_update", NOP)
+    RegisterPatch(bind_anomaly_field, "dyn_anomalies_spawn", NOP)
+
+    RegisterPatch(bind_anomaly_zone, "force_spawn_artefacts", NOP)
+    RegisterPatch(pda, "npc_on_net_spawn", NOP)
+    RegisterPatch(level, "set_weather", NOP)
+    RegisterPatch(dialogs, "drx_sl_give_sl_task", NOP)
+    RegisterPatch(smart_terrain_warfare, "smart_terrain_on_update", NOP)
+    RegisterPatch(sim_squad_bounty, "try_spawn", NOP)
+    RegisterPatch(sim_squad_bounty, "spawn_timer", RETURN_TRUE)
+    RegisterPatch(sim_squad_bounty, "state_timer", RETURN_TRUE)
+    RegisterPatch(sim_squad_bounty, "on_game_start", NOP)
+    RegisterPatch(tasks_chimera_scan, "spawn_on_squad_member", NOP)
+
+    RegisterPatch(ui_sleep_dialog, "dream_callback", function()
+        level.add_cam_effector("camera_effects\\sleep.anm", 10, false, "ui_sleep_dialog.dream_callback2")
+        db.actor.power = 1
+        disable_info("actor_is_sleeping")
+        disable_info("force_slp2")
+    end)
+
+    RegisterPatch(alife_storage_manager.get_state(), "stop_respawns", true) -- Wait, this is a table assignment, not a function!
+    -- Since stop_respawns is a boolean setting in the state table, we don't RegisterPatch it. We keep it as is, but we must check if we are host/client.
+    if not IIsHost() then
+        alife_storage_manager.get_state().stop_respawns = true
+    end
+
+    if sim_board and sim_board.simulation_board then
+        RegisterPatch(sim_board.simulation_board, "create_squad", RETURN_NIL)
+        RegisterPatch(sim_board.simulation_board, "create_squad_at_named_location", RETURN_NIL)
+        RegisterPatch(sim_board.simulation_board, "assign_squad_to_smart", RETURN_NIL)
+    end
+
+    if smart_terrain and smart_terrain.se_smart_terrain then
+        RegisterPatch(smart_terrain.se_smart_terrain, "try_respawn", NOP)
+        RegisterPatch(smart_terrain.se_smart_terrain, "update", function(self)
+            if not self.disabled then
+                self.disabled = true
+            end
+        end)
+    end
+
+    if mob_walker and mob_walker.mob_walker then
+        RegisterPatch(mob_walker.mob_walker, "update", NOP)
+        RegisterPatch(mob_walker.mob_walker, "waypoint_callback", NOP)
+    end
+
+    if state_mgr_animation and state_mgr_animation.animation then
+        RegisterPatch(state_mgr_animation.animation, "set_state", NOP)
+        RegisterPatch(state_mgr_animation.animation, "update_anim", NOP)
+    end
+
+    if xrs_facer and xrs_facer.action_facer then
+        RegisterPatch(xrs_facer.action_facer, "execute", NOP)
+    end
+
+    -- COMPANION DIALOGS
+    RegisterPatch(dialogs_axr_companion, "become_actor_companion", function(actor, npc)
+        local npc = dialogs.who_is_npc(actor, npc)
+        local srv_id = GameManager:GetServerIDByLocalID(npc:id())
+        GameManager:OnICustomScriptAction("dialogs_axr_companion", "become_actor_companion", "db.actor, level.object_by_id(".. tostring(srv_id) .. ")", true)
+    end)
+    RegisterPatch(dialogs_axr_companion, "remove_companions_from_squad", function(actor, npc)
+        local npc = dialogs.who_is_npc(actor, npc)
+        local srv_id = GameManager:GetServerIDByLocalID(npc:id())
+        GameManager:OnICustomScriptAction("dialogs_axr_companion", "remove_companions_from_squad", "db.actor, level.object_by_id(".. tostring(srv_id) .. ")", true)
+    end)
+
+    -- COMPANION GENERIC
+    RegisterPatch(axr_companions, "add_to_actor_squad", dialogs_axr_companion.become_actor_companion)
+    RegisterPatch(axr_companions, "remove_from_actor_squad", dialogs_axr_companion.remove_companions_from_squad)
+    RegisterPatch(dialogs_lostzone, "set_stalker_living_legend_as_companion", dialogs_axr_companion.become_actor_companion)
+    RegisterPatch(dialogs_lostzone, "dismiss_speaker_companion", dialogs_axr_companion.remove_companions_from_squad)
+    RegisterPatch(dialogs_lostzone, "set_degtyarev_taskforce_squad_as_companion", dialogs_axr_companion.become_actor_companion)
+    RegisterPatch(dialogs_agr_u, "set_speaker_as_companion", dialogs_axr_companion.become_actor_companion)
+    RegisterPatch(axr_companions, "companion_add_waypoints", NOP)
+    RegisterPatch(axr_companions, "companion_remove_waypoints", NOP)
+    RegisterPatch(xr_conditions, "validate_spy_task", RETURN_FALSE)
+    RegisterPatch(task_status_functor, "spy_task_status_functor", NOP)
+    RegisterPatch(utils_obj, "switch_online", NOP)
+
+    RegisterPatch(task_functor, "spy_task_target_functor", function(task_id, field, p, tsk)
+        if not (field == "target" and tsk and db.actor) then return end
+        return tsk.current_target or tsk.task_giver_id
+    end)
+
+    RegisterPatch(axr_beh.action_beh, "set_desired_target", NOP)
+    RegisterPatch(bind_anomaly_zone.anomaly_zone_binder, "spawn_artefact_randomly", NOP)
+
+    RegisterPatch(ui_sleep_dialog, "dream_callback", function ()
+        level.add_cam_effector("camera_effects\\sleep.anm", 10, false, "ui_sleep_dialog.dream_callback2")
+        db.actor.power = 1
+    end)
+
+    RegisterPatch(xr_wounded.evaluator_wound, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_patrol.evaluator_patrol_end, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_patrol.evaluator_patrol_comm, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_patrol.action_patrol, "execute", function(self) action_base.execute(self) end)
+    RegisterPatch(xr_patrol.action_commander, "execute", function(self) action_base.execute(self) end)
+    RegisterPatch(xr_camper.action_patrol, "process_danger", NOP)
+    RegisterPatch(xr_camper.evaluator_end, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_camper.evaluator_close_combat, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_camper.action_patrol, "execute", function(self) action_base.execute(self) end)
+    RegisterPatch(xr_animpoint.animpoint, "update", NOP)
+    RegisterPatch(xr_animpoint.evaluator_need_animpoint, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_animpoint.evaluator_reach_animpoint, "evaluate", RETURN_FALSE)
+
+    RegisterPatch(smart_terrain_warfare, "check_unique_npcs", NOP)
+
+    if sim_squad_scripted and sim_squad_scripted.sim_squad_scripted then
+        RegisterPatch(sim_squad_scripted.sim_squad_scripted, "update", NOP)
+        RegisterPatch(sim_squad_scripted.sim_squad_scripted, "check_online_status", NOP)
+        RegisterPatch(sim_squad_scripted.sim_squad_scripted, "remove_squad", NOP)
+        RegisterPatch(sim_squad_scripted.sim_squad_scripted, "sim_available", NOP)
+    end
+
+    RegisterPatch(axr_beh.evaluator_beh, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_fight_from_cover.evaluator_fight_from_cover, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_npc_vs_box.evaluator_npc_vs_box, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_npc_vs_heli.evaluator_npc_vs_heli, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_radio_in_heli.evaluator_radio_in_heli, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_stalker_panic.evaluator_stalker_panic, "evaluate", RETURN_FALSE)
+    RegisterPatch(axr_turn_on_campfire.eva_turn_on_campfire, "evaluate", RETURN_FALSE)
+    RegisterPatch(post_combat_idle.evaluator_combat_enemy, "evaluate", RETURN_FALSE)
+    RegisterPatch(rx_ff.evaluator_dont_shoot, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_abuse.evaluator_abuse, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_campfire_point.evaluator_need_job, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_camper.evaluator_combat_camper, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_camper.evaluator_see, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_monolith.evaluator_combat_monolith, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_monolith.evaluator_see, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_monolith.evaluator_close, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_monolith.evaluator_on_pos, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat_zombied.evaluator_combat_zombied, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat.evaluator_check_combat, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_combat.evaluator_enemy, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_companion.evaluator_need_companion, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_corpse_detection.evaluator_corpse, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_cover.evaluator_need_cover, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_danger.evaluator_danger, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_danger.evaluator_check_danger, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_gather_items.eva_gather_itm, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_gather_items.evaluator_gather_items, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_help_wounded.evaluator_wounded_exist, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_reach_task.evaluator_reached_task_location, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_remark.evaluator_need_remark, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_smartcover.evaluator_use_smartcover_in_combat, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_smartcover.evaluator_need_smartcover, "evaluate", RETURN_FALSE)
+    RegisterPatch(xr_walker.evaluator_need_walker, "evaluate", RETURN_FALSE)
+    RegisterPatch(xrs_facer.evaluator_facer, "evaluate", RETURN_FALSE)
+    RegisterPatch(xrs_facer.evaluator_steal_up, "evaluate", RETURN_FALSE)
+    RegisterPatch(xrs_kill_wounded.eva_kill_wounded, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_animation.eva_state_mgr_animation, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_animstate.eva_state_mgr_animstate, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_bodystate.eva_state_mgr_bodystate, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_direction.eva_state_mgr_direction, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_mental.eva_state_mgr_mental, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_movement.eva_state_mgr_movement, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_smartcover.eva_state_mgr_smartcover_need, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr_weapon.eva_state_mgr_weapon, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr.eva_state_mgr_end, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr.eva_state_mgr_locked, "evaluate", RETURN_FALSE)
+    RegisterPatch(state_mgr.evaluator_state_mgr_idle_alife, "evaluate", RETURN_FALSE)
+
+    RegisterPatch(utils_obj, "try_to_strafe", function (npc, old_vid)
+        return utils_obj.lmove(npc, old_vid, old_vid)
+    end)
+    RegisterPatch(utils_obj, "try_go_aside_object", function (npc, old_vid)
+        return utils_obj.lmove(npc, old_vid, old_vid)
+    end)
+    RegisterPatch(utils_obj, "try_go_backward", function (npc, old_vid)
+        return utils_obj.lmove(npc, old_vid, old_vid)
+    end)
+
+    RegisterPatch(state_mgr.state_manager, "update", NOP)
+    RegisterPatch(move_mgr.move_mgr, "update", NOP)
+    RegisterPatch(move_mgr.move_mgr, "initialize", function(self, npc)
+        self.__disable = true
+    end)
+
+    RegisterPatch(dynamic_news_manager.DynamicNewsManager, "TickRandom", RETURN_TRUE)
+    RegisterPatch(dynamic_news_manager.DynamicNewsManager, "WelcomeToNetwork", NOP)
+    RegisterPatch(release_body_manager.Crelease_body, "clear", NOP)
+    RegisterPatch(xr_combat_ignore, "is_enemy", RETURN_FALSE)
+end

@@ -1,0 +1,343 @@
+--[[
+[================]
+C++ Programmer & Author: Werasik2aa
+Project Creator: Monokit
+Description: CALLING CALLBACKS! LIKE IDEAD IPICKUP E.T.C
+[================]
+--]]
+local GameManager = SteamGameManager()
+local function on_game_load()
+    local se_actor = alife():actor()
+    if se_actor then
+        local aname = GameManager:GetNickName()
+        se_actor:set_character_name(aname)
+    end
+    MPMain_STOGETHER.GlobalLastPosition = db.actor:position()
+    save_var(db.actor, "force_all_talk", true)
+end
+local function actor_on_first_update()
+    MPMain_STOGETHER.GameLoaded = true
+    GameManager:SetGameLoaded(true)
+    GameManager:OnRequest()
+end
+local key_pressed_states = {}
+
+function is_key_pressed(key)
+    return key_pressed_states[key] == true
+end
+
+local function on_key_press(key)
+    key_pressed_states[key] = true
+    if not db.actor then return end
+    if key == MPMain_STOGETHER.ChatKeyBind then
+        MChatbox_STOGETHER.OpenClose()
+    elseif key == DIK_keys.DIK_F8 then
+        MPMain_GamePatches_STOGETHER.UnstuckPlayer()
+    end
+end
+
+local function on_key_release(key)
+    key_pressed_states[key] = false
+end
+
+local space_hold_start = nil
+local revive_start_time = nil
+local revive_target = nil
+local revive_dialog_shown = false
+
+local function actor_on_update()
+    if not db.actor or not db.actor:alive() then return end
+    
+    local tg = time_global()
+    
+    -- Periodic corpse & grenade sync (Host only)
+    if IIsHost() then
+        MPMain_GamePatches_STOGETHER.SyncCorpses(tg)
+        MPMain_GamePatches_STOGETHER.SyncGrenades(tg)
+    end
+
+    -- Retry pending object syncs on clients until the local objects are available.
+    if not IIsHost() and MPMain_GamePatches_STOGETHER.ProcessPendingObjectSyncs then
+        MPMain_GamePatches_STOGETHER.ProcessPendingObjectSyncs()
+    end
+    
+    -- 1. Handle downed state for ourselves
+    if MPMain_STOGETHER.IsDowned then
+        db.actor:set_health_ex(0.2)
+        db.actor.bleeding = 1
+        
+        -- Lock position
+        if MPMain_GamePatches_STOGETHER.downed_pos then
+            local dist = db.actor:position():distance_to(MPMain_GamePatches_STOGETHER.downed_pos)
+            if dist > 0.1 then
+                db.actor:set_actor_position(MPMain_GamePatches_STOGETHER.downed_pos)
+            end
+        end
+        
+        -- Bleedout calculation
+        local elapsed = tg - (MPMain_GamePatches_STOGETHER.downed_start_time or tg)
+        local remaining = math.max(0, 60 - math.floor(elapsed / 1000))
+        
+        if remaining <= 0 then
+            MPMain_GamePatches_STOGETHER.execute_resurrect()
+            return
+        end
+        
+        -- Hold Space to give up
+        if is_key_pressed(DIK_keys.DIK_SPACE) then
+            if not space_hold_start then
+                space_hold_start = tg
+            end
+            local space_elapsed = tg - space_hold_start
+            local space_pct = math.min(100, math.floor((space_elapsed / 3000) * 100))
+            
+            local hud = get_hud()
+            if hud then
+                hud:AddCustomStatic("text_on_screen_center", true)
+                local static = hud:GetCustomStatic("text_on_screen_center")
+                if static then
+                    local msg = string.format("YOU ARE DOWNED!\nGiving up... (Hold [SPACE]: %d%%)", space_pct)
+                    static:wnd():TextControl():SetText(msg)
+                    static:wnd():TextControl():SetTextColor(GetARGB(255, 255, 50, 50))
+                end
+            end
+            
+            if space_elapsed >= 3000 then
+                space_hold_start = nil
+                MPMain_GamePatches_STOGETHER.execute_resurrect()
+                return
+            end
+        else
+            space_hold_start = nil
+            local hud = get_hud()
+            if hud then
+                hud:AddCustomStatic("text_on_screen_center", true)
+                local static = hud:GetCustomStatic("text_on_screen_center")
+                if static then
+                    local msg = string.format("YOU ARE DOWNED!\nWaiting for teammates to revive you...\nHold [SPACE] to give up (Bleedout: %d s)", remaining)
+                    static:wnd():TextControl():SetText(msg)
+                    static:wnd():TextControl():SetTextColor(GetARGB(255, 255, 100, 100))
+                end
+            end
+        end
+        return
+    end
+    
+    -- 2. Handle reviving teammates when we are active
+    local nearest_downed_player = nil
+    local min_dist = 2.5
+    
+    for id, p in pairs(db.actors) do
+        if p.object and p.object:alive() then
+            local netid = p.netid or (p.object.GetNetID and p.object:GetNetID())
+            if netid and MPMain_STOGETHER.DownedPlayers[netid] == true then
+                local dist = db.actor:position():distance_to(p.object:position())
+                if dist < min_dist then
+                    min_dist = dist
+                    nearest_downed_player = p
+                end
+            end
+        end
+    end
+    
+    -- Check items in inventory
+    local has_medkit = false
+    local medkit_obj = nil
+    local has_bandage = false
+    local bandage_obj = nil
+    
+    db.actor:iterate_inventory(function(temp, item)
+        if IsMedKit(item) then
+            has_medkit = true
+            medkit_obj = item
+        elseif IsBandages(item) then
+            has_bandage = true
+            bandage_obj = item
+        end
+    end, nil)
+    
+    if nearest_downed_player then
+        if is_key_pressed(DIK_keys.DIK_F) and (has_medkit or has_bandage) then
+            if not revive_start_time then
+                revive_start_time = tg
+                revive_target = nearest_downed_player
+            end
+            
+            if revive_target ~= nearest_downed_player then
+                revive_start_time = nil
+                revive_target = nil
+            else
+                local revive_elapsed = tg - revive_start_time
+                local pct = math.min(100, math.floor((revive_elapsed / 5000) * 100))
+                
+                local hud = get_hud()
+                if hud then
+                    hud:AddCustomStatic("text_on_screen_center", true)
+                    local static = hud:GetCustomStatic("text_on_screen_center")
+                    if static then
+                        local target_name = nearest_downed_player.object:character_name()
+                        local msg = string.format("Reviving: %s... (Hold [F]: %d%%)", target_name, pct)
+                        static:wnd():TextControl():SetText(msg)
+                        static:wnd():TextControl():SetTextColor(GetARGB(255, 100, 255, 100))
+                    end
+                end
+                
+                if revive_elapsed >= 5000 then
+                    local target_netid = revive_target.netid or (revive_target.object.GetNetID and revive_target.object:GetNetID())
+                    local health_amount = 0.4
+                    
+                    if has_medkit and medkit_obj then
+                        alife_release_full(medkit_obj)
+                        health_amount = 0.4
+                    elseif has_bandage and bandage_obj then
+                        alife_release_full(bandage_obj)
+                        health_amount = 0.15
+                    end
+                    
+                    -- Play custom medic animation on ourselves
+                    GameManager:OnICustomAnimation("werasik2aa_medkit", "", true, 3)
+                    
+                    -- Broadcast revive action
+                    local my_name = GameManager:GetNickName() or "Player"
+                    GameManager:OnICustomScriptAction("MPMain_GamePatches_STOGETHER", "remote_revive_player", serialize_table_simple({target_netid, my_name, health_amount}), false)
+                    
+                    revive_start_time = nil
+                    revive_target = nil
+                    
+                    local hud = get_hud()
+                    if hud then
+                        hud:RemoveCustomStatic("text_on_screen_center")
+                    end
+                end
+            end
+        else
+            revive_start_time = nil
+            revive_target = nil
+            
+            local hud = get_hud()
+            if hud then
+                hud:AddCustomStatic("text_on_screen_center", true)
+                local static = hud:GetCustomStatic("text_on_screen_center")
+                if static then
+                    local target_name = nearest_downed_player.object:character_name()
+                    local msg = ""
+                    if has_medkit then
+                        msg = string.format("[F] Revive: %s (Use Medkit)", target_name)
+                    elseif has_bandage then
+                        msg = string.format("[F] Revive: %s (Use Bandage - 15%% HP)", target_name)
+                    else
+                        msg = string.format("Revive: %s\n(Required: Medkit or Bandage)", target_name)
+                    end
+                    static:wnd():TextControl():SetText(msg)
+                    static:wnd():TextControl():SetTextColor(GetARGB(255, 100, 200, 255))
+                end
+            end
+        end
+    else
+        revive_start_time = nil
+        revive_target = nil
+        revive_dialog_shown = false
+        
+        -- Close revive dialog if no downed players nearby
+        if GetReviveDialog and GetReviveDialog() then
+            CloseReviveDialog()
+        end
+        
+        if not MPMain_STOGETHER.IsDowned then
+            local hud = get_hud()
+            if hud then
+                hud:RemoveCustomStatic("text_on_screen_center")
+            end
+        end
+    end
+end
+local function actor_on_item_take(item)
+    GameManager:OnICustomAnimation("werasik2aa_pickup", item:section(), true, 1)
+end
+local function actor_on_sleep(hour)
+    GameManager:OnICustomAnimation("sleep_idle_0", "", true, 1.6)
+end
+local function actor_on_item_use(item)
+    if not item then return end
+    --[[ 
+    "werasik2aa_tablets", "werasik2aa_drink", "werasik2aa_eat", 
+    "werasik2aa_kurit", "werasik2aa_drug", "werasik2aa_bandage",
+    "werasik2aa_medkit", "werasik2aa_tablets"
+    --]]
+    if IsTablets(item) then
+        GameManager:OnICustomAnimation("werasik2aa_tablets", item:section(), true, 2)
+    elseif IsDrink(item) then
+        GameManager:OnICustomAnimation("werasik2aa_drink", item:section(), true, 2)
+    elseif IsFood(item) then
+        GameManager:OnICustomAnimation("werasik2aa_eat", item:section(), true, 2)
+    elseif IsCigar(item) then
+        GameManager:OnICustomAnimation("werasik2aa_kurit", "sigaret_for_nps", true, 3)
+    elseif IsDrugs(item) then
+        GameManager:OnICustomAnimation("werasik2aa_drug", item:section(), true, 3.5)
+    elseif IsBandages(item) then
+        GameManager:OnICustomAnimation("werasik2aa_bandage", item:section(), true, 4)
+    elseif IsMedKit(item) then
+        GameManager:OnICustomAnimation("werasik2aa_medkit", item:section(), true, 5)
+    elseif IsMedical(item) then
+        GameManager:OnICustomAnimation("werasik2aa_tablets", item:section(), true, 3.5)
+    end
+end
+--ITERATE AND REQUEST NEW ITEMS
+local function actor_on_interaction(temp, _, section)
+    if temp == "mutants" or temp == "corpse" or temp == "box" or temp == "safe" or temp == "stash" then
+        GameManager:OnICustomAnimation("dinamit_0", "", true, 2)
+    elseif temp == "npc" then
+        -- Check if this NPC is a downed player
+        local min_dist = 3.0
+        local nearest_downed = nil
+        
+        for id, p in pairs(db.actors) do
+            if p.object and p.object:alive() then
+                local netid = p.netid or (p.object.GetNetID and p.object:GetNetID())
+                if netid and MPMain_STOGETHER.DownedPlayers[netid] == true then
+                    local dist = db.actor:position():distance_to(p.object:position())
+                    if dist < min_dist then
+                        min_dist = dist
+                        nearest_downed = p
+                    end
+                end
+            end
+        end
+        
+        if nearest_downed then
+            local has_medkit = false
+            local has_bandage = false
+            
+            db.actor:iterate_inventory(function(temp, item)
+                if IsMedKit(item) then
+                    has_medkit = true
+                elseif IsBandages(item) then
+                    has_bandage = true
+                end
+            end, nil)
+            
+            -- Show revive dialog instead of normal NPC dialog
+            ShowReviveDialog(nearest_downed, has_medkit, has_bandage)
+        end
+    end
+end
+function on_game_start()
+    -- REPEAT PATCH UNPATCHED PLACE
+    MPMain_GamePatches_STOGETHER.Patch()
+    if not IIsHost() then
+        MPMain_Client_STOGETHER.Patch()
+    else
+        MPMain_Server_STOGETHER.Patch()
+    end
+    -- REGISTER CALLBACKS
+    RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
+    RegisterScriptCallback("on_game_load", on_game_load)
+    RegisterScriptCallback("actor_on_item_take", actor_on_item_take)
+    RegisterScriptCallback("actor_on_item_use", actor_on_item_use)
+    RegisterScriptCallback("on_key_press", on_key_press)
+    RegisterScriptCallback("on_key_release", on_key_release)
+    RegisterScriptCallback("actor_on_update", actor_on_update)
+    RegisterScriptCallback("actor_on_interaction", actor_on_interaction)
+    RegisterScriptCallback("actor_on_sleep", actor_on_sleep)
+    RegisterScriptCallback("on_option_change", MPMain_STOGETHER.RestoreValues)
+end

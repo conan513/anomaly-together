@@ -1,0 +1,228 @@
+--[[
+[================]
+C++ Programmer & Author: Werasik2aa
+Project Creator: Monokit
+Description: Client Callbacks.
+[================]
+--]]
+function OnConnected(state)
+    local mss = "Connected to server as"
+    local ass = state and "host!" or "client!"
+    if level.present() then
+        news_manager.send_tip(db.actor, mss.." "..ass, nil, "nano", 20000)
+    elseif not MPMain_STOGETHER.GameLoaded then
+        local new_game_dlg = ui_mm_faction_select.UINewGame(ui_main_menu.INSTANCE)
+        new_game_dlg:ShowDialog(true)
+	end
+end
+
+function OnPlayerConnected(PlayerNetID, NickName)
+    log("[Server] On Player Connected")
+    log("[Server] PlayerID: "..tostring(PlayerNetID))
+    log("[Server] PlayerNA: "..tostring(NickName))
+    if db.actor then
+        local mss = "Player "..tostring(NickName).." connected to level: "..tostring(level.name())
+        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
+        local mchatclass = MChatbox_STOGETHER.GetChatBox()
+        if mchatclass then
+            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
+            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 200, 50))
+        end
+    end
+    SendScriptCallback("onmp_player_connected", PlayerNetID, NickName)
+end
+
+function OnPlayerDisconnectedClient(NickName)
+    if db.actor then
+        local mss = "Player "..tostring(NickName).." disconnected"
+        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
+        local mchatclass = MChatbox_STOGETHER.GetChatBox()
+        if mchatclass then
+            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
+            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 100, 100))
+        end
+    end
+end
+
+function OnPlayerChangedLevel(PlayerNetID, SE_OBJ, NickName)
+    if not SE_OBJ then return end
+    log("[Client] On Player Changed Level")
+    log("[Client] NetID: "..tostring(PlayerNetID))
+    if db.actor then
+        local mss = "Player "..tostring(NickName).." changing level"
+        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
+        local mchatclass = MChatbox_STOGETHER.GetChatBox()
+        if mchatclass then
+            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
+            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 200, 50))
+        end
+    end
+    SendScriptCallback("onmp_player_changed_level", PlayerNetID, SE_OBJ, NickName)
+end
+
+function OnPlayerChatted(PlayerNetID, NickName, MSG)
+    local is_me = db.actor and NickName == db.actor:character_name()
+    local color = is_me and GetARGB(255, 100, 200, 255) or GetARGB(255, 100, 255, 100)
+    local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
+    local mss = time_str .. NickName.."> "..tostring(MSG)
+    news_manager.send_tip(db.actor, mss, nil, "freedom2", 20000)
+    local mchatclass = MChatbox_STOGETHER.GetChatBox()
+    if mchatclass then
+        mchatclass:AddMessage(mss, color)
+    end
+    SendScriptCallback("onmp_player_chatted_message", PlayerNetID, NickName, MSG)
+end
+
+function OnPlayerChangedVisual(PlayerNetID, SV_NAME)
+    SendScriptCallback("onmp_player_changed_visual", PlayerNetID, SV_NAME)
+end
+
+function OnPlayerInfoPortion(PlayerNetID, info_id, state)
+    SendScriptCallback("onmp_player_info_portion", PlayerNetID, info_id, state)
+end
+
+function OnEntitySpawned(se_obj)
+    if not se_obj then return end
+    MPMain_STOGETHER.AwaitThing = se_obj
+    SendScriptCallback("onmp_entity_spawned", se_obj)
+end
+
+function OnPlayerTask(PlayerNetID, TaskID, TaskGIVER, TaskMID, TaskSTATE, TaskStage)
+    log("-[Client] ~~~ On Player Task Give ~~~")
+    log("[Client] PlayerID: "..tostring(PlayerNetID))
+    log("[Client] TaskID: "..tostring(TaskID))
+    log("[Client] Giver_ID: "..tostring(TaskGIVER))
+    log("[Client] MapObject_ID: "..tostring(TaskMID))
+    log("[Client] Task_State: "..tostring(TaskSTATE))
+    log("[Client] Task_Stage: "..tostring(TaskStage))
+    local tm = task_manager.get_task_manager()
+    -- UPDATE TASK
+    if tm and tm.task_info[TaskID] then
+        tm.task_info[TaskID].current_target = TaskMID
+        if TaskSTATE == task.completed then
+            tm.task_info[TaskID].forced_status = "complete"
+        elseif TaskSTATE == task.fail then
+            tm.task_info[TaskID].forced_status = "fail"
+        end
+        tm.task_info[TaskID].stage = TaskStage
+        tm.task_info[TaskID].task_giver_id = TaskGIVER
+        if tm.task_info[TaskID].t then
+            tm.task_info[TaskID].t:change_map_location(tm.task_info[TaskID].spot, TaskMID)
+        end
+    elseif tm then -- GIVE TASK
+        tm:give_task_client(TaskID, TaskGIVER < 65535 and TaskGIVER or nil, PlayerNetID)
+    end
+end
+
+local bad_funcs = {
+    ["fetch_reward_and_remove"]       = true,
+    ["remove_fetch_item"]             = true,
+    ["remove_artefact_item"]          = true,
+    ["remove_delivery_item"]          = true,
+    ["multifetch_remove"]             = true,
+    ["remove_quest_item"]             = true,
+    ["reward_random_money"]           = true,
+    ["reward_random_money_by_dist"]   = true,
+    ["reward_random_item"]            = true,
+    ["drx_sl_reward_random_artefact"] = true,
+    ["reward_item"]                   = true,
+}
+
+function OnForcedTaskState(PlayerNetID, TaskID, TaskState)
+    printf("-[Client] ~~~ On Forced Task State ~~~ \nPlayer: %s, \nTask: %s", PlayerNetID, TaskID)
+
+    local tm = task_manager.get_task_manager()
+    local tsk = tm.task_info[TaskID]
+    if not tsk then return end
+    tsk.forced_status = TaskState
+    if TaskState ~= "complete" or type(tsk.on_complete) ~= "table" then return end
+    -- Remove keys i find them
+    for i, cond_block in pairs(tsk.on_complete) do
+        if type(cond_block) == "table" then
+            for j, effects_list in pairs(cond_block) do
+                if type(effects_list) == "table" then
+                    for k = #effects_list, 1, -1 do
+                        local action = effects_list[k]
+                        if type(action) == "table" and type(action[1]) == "string" and bad_funcs[action[1]] then
+                            printf("-[Client] ---> REMOVED: %s", action[1])
+                            table.remove(effects_list, k)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+function OnPlayerInteracted(PlayerNetID, typea, ObjID, State)
+    local obj = level.object_by_id(ObjID)
+    if not obj then return end
+    if typea == 0 then
+        local cf = obj.get_campfire and obj:get_campfire()
+        if not cf then return end
+        if State and not cf:is_on() then
+            cf:turn_on()
+        elseif not State and cf:is_on() then
+            cf:turn_off()
+        else
+            log("!Man wtf about doying")
+        end
+    elseif typea == 1 then
+        OnPlayerOpenDoor(PlayerNetID, ObjID, State)
+    elseif typea == 2 then
+        OnPlayerSwitchButton(PlayerNetID, ObjID, State)
+    end
+    SendScriptCallback("onmp_player_interact", PlayerNetID, typea, ObjID, State)
+end
+
+function OnPlayerOpenDoor(PlayerNetID, DoorID, State)
+    local to = db.storage[DoorID]
+    local door = to and to.ph_door and to.ph_door.door_action
+    if not door or not door.open_door or not door.close_door then
+        callstack()
+        log("[Client] THIS DOOR DOESN'T EXIST")
+        return
+    end
+    -- get_wrapper of furniture? Just use this callback
+    log("[Client] Player with NetID "..tostring(PlayerNetID).." Used doorID"..tostring(DoorID))
+    if State then
+        door:close_door(false)
+    else
+        door:open_door(false)
+    end
+end
+
+function OnPlayerSwitchButton(PlayerNetID, ButtonID, state)
+    local to = db.storage[ButtonID]
+    local button = to and to.ph_button and to.ph_button.button_action
+    if not button or not button.use_callback then
+        callstack()
+        log("[Client] THIS BUTTON DOESN'T EXIST")
+        return
+    end
+    log("[Client] Player with NetID "..tostring(PlayerNetID).." Used buttonID"..tostring(ButtonID))
+    button:try_switch()
+end
+
+function OnPlaySound(Sound_Name, Position, NPID)
+    local obj = NPID ~= 65535 and level.object_by_id(NPID)
+    if not getFS():exist("$game_sounds$", Sound_Name..".ogg") then
+        if obj then
+            xr_sound.set_sound_play_client(NPID, Sound_Name, "stalker", sound_object.s2d)
+        else
+            xr_sound.set_sound_play_client(0, Sound_Name, "stalker", sound_object.s2d)
+        end
+        return
+    end
+    local snd = sound_object(Sound_Name)
+    if not snd then
+        log("![Client] Failed to play sound by path: "..tostring(Sound_Name))
+        return
+    end
+    log("[Client] Playing sound: "..tostring(Sound_Name))
+    if obj then
+        snd:play_no_feedback(obj, 0, 0, Position, 1.0, 1.0)
+    else
+        snd:play_no_feedback(db.actor, 0, 0, Position, 1.0, 1.0)
+    end
+end

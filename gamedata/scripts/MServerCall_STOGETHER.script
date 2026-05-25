@@ -1,0 +1,127 @@
+--[[
+[================]
+C++ Programmer & Author: Werasik2aa
+Project Creator: Monokit
+Description: Server Callbacks.
+[================]
+--]]
+local GameManager = SteamGameManager()
+local PlayerManager = GameManager:GetPlayerManager()
+function OnPlayerConnected(PlayerNetID, NickName)
+    log("[Server] On Player Connected")
+    log("[Server] PlayerID: "..tostring(PlayerNetID))
+    log("[Server] PlayerNA: "..tostring(NickName))
+    -- Begin
+    if PlayerNetID == GameManager:GetMySNETID() then return end
+
+    log("-[Server] Syncing task data!")
+    local tm = task_manager.get_task_manager()
+    for id, tma in pairs(tm.task_info) do
+        if tma.t then
+            PlayerManager:SyncTaskWith(PlayerNetID, tma.t, tma.task_giver_id or 65535, tma.stage)
+            MPMain_QuestPatches_STOGETHER.sync_task_variables(id, PlayerNetID)
+            CreateTimeEvent(id, "spawn_entities", 1, function ()
+                MPMain_QuestPatches_STOGETHER.PerformRespawnTaskObjects(tma, PlayerNetID)
+                return true
+            end)
+        end
+    end
+
+    log("-[Server] Syncing axr task data!")
+    GameManager:OnICustomScriptAction("dialogs", "remote_sync_ongoing_tasks", serialize_table_simple(axr_task_manager.ongoing_tasks or {}), false, PlayerNetID)
+
+    log("-[Server] Syncing emission data!")
+    local s = surge_manager and surge_manager.get_surge_manager()
+    local ps = psi_storm_manager and psi_storm_manager.get_psi_storm_manager()
+    PlayerManager:SyncEmissionPsy(PlayerNetID, false, s and s.started or false)
+    PlayerManager:SyncEmissionPsy(PlayerNetID, true, ps and ps.started or false)
+
+    CreateTimeEvent(0, "Sync_Spots", 1, function ()
+        log("-[Server] Syncing spots data!")
+        SpotsSync.sync_map_spots(PlayerNetID)
+        SpotsSync.sync_story_npc_markers(PlayerNetID)
+        return true
+    end)
+
+    log("-[Server] Syncing game_difficulties!")
+    local mdata = alife_storage_manager.get_state()
+    if mdata then
+        local payload = { mdata.diff_game, mdata.diff_eco }
+        GameManager:OnICustomScriptAction("game_difficulties", "sync_array_diffs", serialize_table_simple(payload), false, PlayerNetID)
+    end
+
+    CreateTimeEvent(0, "Sync_Stashes", 1, function ()
+        log("-[Server] Syncing treasure cache data!")
+        treasure_manager.sync_all_stashes(PlayerNetID)
+
+        log("-[Server] Syncing player stash cache data!")
+        item_backpack.sync_all_stashes(PlayerNetID)
+        return true
+    end)
+end
+
+function OnPlayerDisconnected(PlayerNetID, NickName)
+    log("[Server] On Player Disconnected")
+    log("[Server] PlayerID: "..tostring(PlayerNetID))
+    log("[Server] PlayerNA: "..tostring(NickName))
+
+    -- NPC lock cleanup
+    local busied = MPMain_QuestPatches_STOGETHER.get_busied_npcs()
+    if busied then
+        for id, bstbl in pairs(busied) do
+            if bstbl.netid == PlayerNetID then
+                local server_id = GameManager:GetServerIDByLocalID(id)
+                local payload = { id = server_id, busy = false, netid = PlayerNetID }
+                -- Broadcast unlock to all clients
+                GameManager:OnICustomScriptAction("dialogs", "remote_configure_npc", serialize_table_simple(payload), false)
+                -- Also unlock locally on host
+                local npc = level.object_by_id(id)
+                if npc then
+                    npc:set_nonscript_usable(true)
+                    npc:enable_talk()
+                end
+                busied[id] = nil
+            end
+        end
+    end
+
+    -- Broadcast disconnect notification to all clients' chatbox
+    GameManager:OnICustomScriptAction("MClientCall_STOGETHER", "OnPlayerDisconnectedClient", NickName, false)
+
+    -- Local notification on host
+    if db.actor then
+        local mss = "Player "..tostring(NickName).." disconnected"
+        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
+        local mchatclass = MChatbox_STOGETHER.GetChatBox()
+        if mchatclass then
+            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
+            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 100, 100))
+        end
+    end
+end
+
+function OnPlayerChatted(PlayerNetID, NickName, MSG)
+    -- Chat commands can be here too
+end
+
+function IsUsedStorage(npc)
+    if not npc then return false end
+    if IsStalker(npc) then
+        if npc:alive() then
+            trade_manager.update(npc, false)
+            return false
+        end
+        log("! [SERVER] PROCESSING INVENTORY->CORPSE STORAGE!")
+        death_manager.create_release_item(npc)
+        return not se_load_var(npc:id(), npc:name(), "death_dropped")
+    elseif IsInvbox(npc) then
+        local loot_dropped = se_load_var(npc:id(), npc:name(), "loot_dropped")
+        if not loot_dropped then
+            log("! [SERVER] PROCESSING INVENTORY->BOX STORAGE!")
+            treasure_manager.try_spawn_treasure(npc)
+            se_save_var(npc:id(), npc:name(), "loot_dropped", true)
+            return treasure_manager.caches[npc:id()]
+        end
+    end
+    return false
+end

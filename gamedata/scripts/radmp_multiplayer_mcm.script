@@ -1,0 +1,20 @@
+function on_mcm_load()
+    return {
+        id = "werasik2aa", sh = true, gr = {
+            { id = "banner", type = "slide", text = "ui_radmp_title", size = { 512, 50 }, spacing = 20 },
+            { id = "p2p_peer_chat", type = "key_bind", val = 2, def = DIK_keys.DIK_RMENU },
+            { id = "sections_check", type = "check", val = 1, def = false},
+            { id = "show_stats", type = "check", val = 1, def = false},
+			{ id = "show_marks", type = "check", val = 1, def = true},
+            { id = "show_name", type = "check", val = 1, def = true},
+            { id = "clear_inv", type = "check", val = 1, def = false},
+            { id = "drop_inv", type = "check", val = 1, def = false},
+            { id = "resurrect_allow", type = "check", val = 1, def = true},
+            { id = "downed_allow", type = "check", val = 1, def = true},
+            { id = "resurrect_timeout", type = "track", val = 2, min = 1, max = 60, step = 1, def = 15 },
+            { id = "friendly_fire", type = "check", val = 1, def = false},
+            { id = "transvestit_to_level", type = "check", val = 1, def = true},
+            { id = "max_players", type = "track", val = 2, min = 1, max = 4, step = 1, def = 3 }
+        }
+    }
+end
