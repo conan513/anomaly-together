@@ -343,20 +343,20 @@ function Patch()
     bind_stalker_ext.actor_on_before_death = function(binder, whoID)
         if MPMain_STOGETHER.IDead then return end
 
-        if MPMain_STOGETHER.AllowResurrect then
-            -- Downed mechanic enabled: enter/stay in downed state
-            if MPMain_STOGETHER.AllowDowned then
-                if not MPMain_STOGETHER.IsDowned then
-                    MPMain_GamePatches_STOGETHER.enter_downed_state()
-                else
-                    -- Already downed – just keep health stable; ignore extra hits
-                    db.actor:set_health_ex(0.2)
-                    db.actor.bleeding = 1
-                end
-                return
+        -- 1. Check Downed mechanic FIRST (independent of Resurrect)
+        if MPMain_STOGETHER.AllowDowned then
+            if not MPMain_STOGETHER.IsDowned then
+                MPMain_GamePatches_STOGETHER.enter_downed_state()
+            else
+                -- Already downed – just keep health stable; ignore extra hits
+                db.actor:set_health_ex(0.2)
+                db.actor.bleeding = 1
             end
+            return
+        end
 
-            -- Downed disabled but resurrect enabled: vanilla timed respawn
+        -- 2. Downed disabled but resurrect enabled: vanilla timed respawn
+        if MPMain_STOGETHER.AllowResurrect then
             if not MPMain_STOGETHER.IDead then
                 MPMain_STOGETHER.IDead = true
                 if MPMain_STOGETHER.DropInvOnDeath then
@@ -2038,8 +2038,17 @@ function enter_downed_state()
     db.actor:set_health_ex(0.2)
     db.actor.bleeding = 1  -- Stop bleeding
     
-    -- Hide weapons
-    db.actor:hide_weapon()
+    -- Safely hide weapon without breaking input (allowing Space to work)
+    if not MPMain_STOGETHER.weapon_hidden then
+        db.actor:hide_weapon()
+        MPMain_STOGETHER.weapon_hidden = true
+    end
+    
+    local hud = get_hud()
+    if hud then hud:HidePdaMenu() end
+    
+    -- Switch to 3rd person free camera so the player sees themselves on the ground
+    get_console():execute("cam_3")
     
     -- Play wounded loop animation
     GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 340000)
@@ -2066,12 +2075,14 @@ function execute_resurrect()
         hud:RemoveCustomStatic("text_on_screen_center")
     end
     
-    -- Restore weapon state after downed (multiple calls to balance hide_weapon nesting)
-    if db.actor then
-        for i = 1, 10 do
-            db.actor:restore_weapon()
-        end
+    -- Restore weapon safely using the flag
+    if db.actor and MPMain_STOGETHER.weapon_hidden then
+        db.actor:restore_weapon()
+        MPMain_STOGETHER.weapon_hidden = false
     end
+    
+    -- Return to 1st person view
+    get_console():execute("cam_1")
     
     -- Broadcast downed state cleared
     local my_netid = GameManager:GetMySNETID()
@@ -2112,6 +2123,13 @@ function execute_resurrect()
         db.actor:iterate_ruck(itr_inv, nil)
     end
     
+    -- If Resurrect is disabled, giving up or bleeding out means actual death
+    if not MPMain_STOGETHER.AllowResurrect then
+        -- Don't clear IDead so they stay dead
+        db.actor:kill(db.actor)
+        return
+    end
+
     -- Run normal resurrect/respawn logic (teleport to camp/campfire, restore health, etc.)
     bind_stalker_ext.death_manager_mp(false, false)
     MPMain_STOGETHER.IDead = false
@@ -2134,12 +2152,14 @@ function execute_revive(health_amount, reviver_name)
     -- Clear downed visual animation
     GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 1) -- Reset anim
     
-    -- Restore weapon (multiple calls to balance hide_weapon nesting)
-    if db.actor then
-        for i = 1, 10 do
-            db.actor:restore_weapon()
-        end
+    -- Restore weapon safely using the flag
+    if db.actor and MPMain_STOGETHER.weapon_hidden then
+        db.actor:restore_weapon()
+        MPMain_STOGETHER.weapon_hidden = false
     end
+    
+    -- Return to 1st person view
+    get_console():execute("cam_1")
     
     -- Restore input and UI
     bind_stalker_ext.clear_death_logo()
@@ -2290,7 +2310,7 @@ function remote_sync_corpses(tbl)
                     local dy  = cur.y - y
                     local dz  = cur.z - z
                     local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                    if dist > 1.0 then
+                    if dist > 1.5 then
                         local target_pos = vector():set(x, y, z)
                         teleport_physics_object(obj, target_pos)
                     end
@@ -2300,7 +2320,12 @@ function remote_sync_corpses(tbl)
     end
 end
 
+local pending_sync_timer = 0
 function ProcessPendingObjectSyncs()
+    local tg = time_global()
+    if tg - pending_sync_timer < 500 then return end
+    pending_sync_timer = tg
+
     for srv_id, tbl in pairs(pending_grenade_syncs) do
         local lid = GameManager:GetLocalIDByServerID(srv_id)
         if lid and lid ~= -1 then
@@ -2326,7 +2351,7 @@ function ProcessPendingObjectSyncs()
                 local dy  = cur.y - y
                 local dz  = cur.z - z
                 local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                if dist > 1.0 then
+                if dist > 1.5 then
                     teleport_physics_object(obj, target_pos)
                 end
                 pending_corpse_syncs[id] = nil
@@ -2443,10 +2468,14 @@ function remote_sync_grenade(tbl)
     local dz = cur.z - z
     local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
 
-    -- Only snap if more than 0.3 m off (ignore tiny float errors)
-    if dist > 0.3 then
+    -- Only snap if more than 2.5 m off (ignore tiny float errors and prevent rubber-banding against local physics engine)
+    if dist > 2.5 then
         local target_pos = vector():set(x, y, z)
         teleport_physics_object(obj, target_pos)
+        local shell = obj.get_physics_shell and obj:get_physics_shell()
+        if shell then
+            shell:set_linear_vel(vector():set(vx, vy, vz))
+        end
     end
 end
 
@@ -2503,12 +2532,12 @@ function UnstuckPlayer()
     -- 3. Clear registered UI tables
     _G.RES_GUIs = {}
     
-    -- 4. Restore weapons
-    if db.actor then
-        for i = 1, 10 do
-            db.actor:restore_weapon()
-        end
+    -- 4. Restore weapons safely
+    if db.actor and MPMain_STOGETHER.weapon_hidden then
+        db.actor:restore_weapon()
+        MPMain_STOGETHER.weapon_hidden = false
     end
+    get_console():execute("cam_1")
     
     -- 5. Remove camera effectors
     for i = 1, 100 do

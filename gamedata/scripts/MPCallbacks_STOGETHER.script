@@ -45,6 +45,50 @@ local revive_start_time = nil
 local revive_target = nil
 local revive_dialog_shown = false
 
+local last_actor_update_tick = 0
+local ACTOR_UPDATE_INTERVAL = 250
+local last_nearest_downed_scan = 0
+local NEAREST_DOWNED_SCAN_INTERVAL = 500
+local nearest_downed_cache = nil
+local has_medkit_cache = false
+local medkit_cache_obj = nil
+local has_bandage_cache = false
+local bandage_cache_obj = nil
+
+local function scan_nearest_downed()
+    nearest_downed_cache = nil
+    has_medkit_cache = false
+    medkit_cache_obj = nil
+    has_bandage_cache = false
+    bandage_cache_obj = nil
+    local min_dist = 2.5
+
+    for id, p in pairs(db.actors) do
+        if p.object and p.object:alive() then
+            local netid = p.netid or (p.object.GetNetID and p.object:GetNetID())
+            if netid and MPMain_STOGETHER.DownedPlayers[netid] == true then
+                local dist = db.actor:position():distance_to(p.object:position())
+                if dist < min_dist then
+                    min_dist = dist
+                    nearest_downed_cache = p
+                end
+            end
+        end
+    end
+
+    if nearest_downed_cache then
+        db.actor:iterate_inventory(function(temp, item)
+            if IsMedKit(item) and not medkit_cache_obj then
+                has_medkit_cache = true
+                medkit_cache_obj = item
+            elseif IsBandages(item) and not bandage_cache_obj then
+                has_bandage_cache = true
+                bandage_cache_obj = item
+            end
+        end, nil)
+    end
+end
+
 local function actor_on_update()
     if not db.actor or not db.actor:alive() then return end
     
@@ -60,6 +104,12 @@ local function actor_on_update()
     if not IIsHost() and MPMain_GamePatches_STOGETHER.ProcessPendingObjectSyncs then
         MPMain_GamePatches_STOGETHER.ProcessPendingObjectSyncs()
     end
+
+    -- Throttle heavy update logic so NPC updates are more responsive.
+    if tg - last_actor_update_tick < ACTOR_UPDATE_INTERVAL then
+        return
+    end
+    last_actor_update_tick = tg
     
     -- 1. Handle downed state for ourselves
     if MPMain_STOGETHER.IsDowned then
@@ -124,86 +174,59 @@ local function actor_on_update()
     end
     
     -- 2. Handle reviving teammates when we are active
-    local nearest_downed_player = nil
-    local min_dist = 2.5
-    
-    for id, p in pairs(db.actors) do
-        if p.object and p.object:alive() then
-            local netid = p.netid or (p.object.GetNetID and p.object:GetNetID())
-            if netid and MPMain_STOGETHER.DownedPlayers[netid] == true then
-                local dist = db.actor:position():distance_to(p.object:position())
-                if dist < min_dist then
-                    min_dist = dist
-                    nearest_downed_player = p
-                end
-            end
-        end
+    if tg - last_nearest_downed_scan > NEAREST_DOWNED_SCAN_INTERVAL then
+        last_nearest_downed_scan = tg
+        scan_nearest_downed()
     end
-    
-    -- Check items in inventory
-    local has_medkit = false
-    local medkit_obj = nil
-    local has_bandage = false
-    local bandage_obj = nil
-    
-    db.actor:iterate_inventory(function(temp, item)
-        if IsMedKit(item) then
-            has_medkit = true
-            medkit_obj = item
-        elseif IsBandages(item) then
-            has_bandage = true
-            bandage_obj = item
-        end
-    end, nil)
-    
-    if nearest_downed_player then
-        if is_key_pressed(DIK_keys.DIK_F) and (has_medkit or has_bandage) then
+
+    if nearest_downed_cache then
+        if is_key_pressed(DIK_keys.DIK_F) and (has_medkit_cache or has_bandage_cache) then
             if not revive_start_time then
                 revive_start_time = tg
-                revive_target = nearest_downed_player
+                revive_target = nearest_downed_cache
             end
-            
-            if revive_target ~= nearest_downed_player then
+
+            if revive_target ~= nearest_downed_cache then
                 revive_start_time = nil
                 revive_target = nil
             else
                 local revive_elapsed = tg - revive_start_time
                 local pct = math.min(100, math.floor((revive_elapsed / 5000) * 100))
-                
+
                 local hud = get_hud()
                 if hud then
                     hud:AddCustomStatic("text_on_screen_center", true)
                     local static = hud:GetCustomStatic("text_on_screen_center")
                     if static then
-                        local target_name = nearest_downed_player.object:character_name()
+                        local target_name = nearest_downed_cache.object:character_name()
                         local msg = string.format("Reviving: %s... (Hold [F]: %d%%)", target_name, pct)
                         static:wnd():TextControl():SetText(msg)
                         static:wnd():TextControl():SetTextColor(GetARGB(255, 100, 255, 100))
                     end
                 end
-                
+
                 if revive_elapsed >= 5000 then
                     local target_netid = revive_target.netid or (revive_target.object.GetNetID and revive_target.object:GetNetID())
                     local health_amount = 0.4
-                    
-                    if has_medkit and medkit_obj then
-                        alife_release_full(medkit_obj)
+
+                    if medkit_cache_obj then
+                        alife_release_full(medkit_cache_obj)
                         health_amount = 0.4
-                    elseif has_bandage and bandage_obj then
-                        alife_release_full(bandage_obj)
+                    elseif bandage_cache_obj then
+                        alife_release_full(bandage_cache_obj)
                         health_amount = 0.15
                     end
-                    
+
                     -- Play custom medic animation on ourselves
                     GameManager:OnICustomAnimation("werasik2aa_medkit", "", true, 3)
-                    
+
                     -- Broadcast revive action
                     local my_name = GameManager:GetNickName() or "Player"
                     GameManager:OnICustomScriptAction("MPMain_GamePatches_STOGETHER", "remote_revive_player", serialize_table_simple({target_netid, my_name, health_amount}), false)
-                    
+
                     revive_start_time = nil
                     revive_target = nil
-                    
+
                     local hud = get_hud()
                     if hud then
                         hud:RemoveCustomStatic("text_on_screen_center")
@@ -213,17 +236,17 @@ local function actor_on_update()
         else
             revive_start_time = nil
             revive_target = nil
-            
+
             local hud = get_hud()
             if hud then
                 hud:AddCustomStatic("text_on_screen_center", true)
                 local static = hud:GetCustomStatic("text_on_screen_center")
                 if static then
-                    local target_name = nearest_downed_player.object:character_name()
+                    local target_name = nearest_downed_cache.object:character_name()
                     local msg = ""
-                    if has_medkit then
+                    if has_medkit_cache then
                         msg = string.format("[F] Revive: %s (Use Medkit)", target_name)
-                    elseif has_bandage then
+                    elseif has_bandage_cache then
                         msg = string.format("[F] Revive: %s (Use Bandage - 15%% HP)", target_name)
                     else
                         msg = string.format("Revive: %s\n(Required: Medkit or Bandage)", target_name)
@@ -237,12 +260,12 @@ local function actor_on_update()
         revive_start_time = nil
         revive_target = nil
         revive_dialog_shown = false
-        
+
         -- Close revive dialog if no downed players nearby
         if GetReviveDialog and GetReviveDialog() then
             CloseReviveDialog()
         end
-        
+
         if not MPMain_STOGETHER.IsDowned then
             local hud = get_hud()
             if hud then
