@@ -10,7 +10,6 @@ function on_mcm_load()
             { id = "clear_inv", type = "check", val = 1, def = false},
             { id = "drop_inv", type = "check", val = 1, def = false},
             { id = "resurrect_allow", type = "check", val = 1, def = true},
-            { id = "downed_allow", type = "check", val = 1, def = true},
             { id = "resurrect_timeout", type = "track", val = 2, min = 1, max = 60, step = 1, def = 15 },
             { id = "friendly_fire", type = "check", val = 1, def = false},
             { id = "transvestit_to_level", type = "check", val = 1, def = true},

@@ -342,74 +342,63 @@ function Patch()
     end
     bind_stalker_ext.actor_on_before_death = function(binder, whoID)
         if MPMain_STOGETHER.IDead then return end
-
-        -- 1. Check Downed mechanic FIRST (independent of Resurrect)
-        if MPMain_STOGETHER.AllowDowned then
-            if not MPMain_STOGETHER.IsDowned then
-                MPMain_GamePatches_STOGETHER.enter_downed_state()
-            else
-                -- Already downed – just keep health stable; ignore extra hits
-                db.actor:set_health_ex(0.2)
-                db.actor.bleeding = 1
-            end
-            return
-        end
-
-        -- 2. Downed disabled but resurrect enabled: vanilla timed respawn
-        if MPMain_STOGETHER.AllowResurrect then
-            if not MPMain_STOGETHER.IDead then
-                MPMain_STOGETHER.IDead = true
-                if MPMain_STOGETHER.DropInvOnDeath then
-                    log("[MLEVELM] Dropping actor inventory. We dead")
-                    alife_create_awaite(function(se_obj)
-                        if se_obj then
-                            local m_data = alife_storage_manager.get_state()
-                            if not m_data.player_created_stashes then m_data.player_created_stashes = {} end
-                            m_data.player_created_stashes[se_obj.id] = "itm_backpack"
-                            level.map_add_object_spot_ser(se_obj.id, "treasure", "MYLOOT")
-                            local function drop_items(boxid)
-                                local obj = level.object_by_id(boxid)
-                                if obj then
-                                    local function itr_inv(_, item)
-                                        db.actor:transfer_item(item, obj)
-                                        SendScriptCallback("actor_on_item_put_in_box", obj, item)
-                                    end
-                                    db.actor:iterate_ruck(itr_inv, nil)
-                                    return true
-                                end
-                                return false
-                            end
-                            CreateTimeEvent(0, "actor_backpack", 0, drop_items, se_obj.id)
-                        end
-                    end, "inv_backpack", db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id())
-                elseif MPMain_STOGETHER.ClearInvOnDeath then
-                    log("[MLEVELM] Clearing actor inventory. We dead")
-                    local function itr_inv(_, item)
-                        alife_release_full(item)
-                    end
-                    db.actor:iterate_ruck(itr_inv, nil)
-                end
-                CreateTimeEvent(0, "resurrect_action", MPMain_STOGETHER.TimeEResurrect, function()
-                    bind_stalker_ext.death_manager_mp(false, false)
-                    MPMain_STOGETHER.IDead = false
-                    GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 1)
-                    return db.actor.health > 0.2
-                end)
-                GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 340000)
-                bind_stalker_ext.death_manager_mp(false, true)
-            end
-            return
-        end
-
-        -- Resurrect disabled: plain death
         MPMain_STOGETHER.IDead = true
+        -- Why not...
         local flags = { ret_value = false }
-        SendScriptCallback("actor_on_before_death", whoID, flags)
-        if not flags.ret_value then
-            bind_stalker_ext.death_manager_mp(true, true)
-            GameManager:OnICustomScriptAction("bind_stalker_ext", "death_manager_mp", "true, true", false)
-            db.actor:kill(db.actor, true)
+        if not MPMain_STOGETHER.AllowResurrect then
+            SendScriptCallback("actor_on_before_death", whoID, flags)
+            -- Kill us if allowed
+            if not flags.ret_value then
+                bind_stalker_ext.death_manager_mp(true, true)
+                GameManager:OnICustomScriptAction("bind_stalker_ext", "death_manager_mp", "true, true", false)
+                db.actor:kill(db.actor, true)
+            end
+            -- IDK WHY... BUT HERE MUST BE ANOTHER ADDON CALL THAT flags.
+            -- We cant go here because resurrect allow flag flase!
+            return
         end
+        if MPMain_STOGETHER.DropInvOnDeath then
+            log("[MLEVELM] Dropping actor inventory. We dead")
+            alife_create_awaite(function(se_obj)
+                if se_obj then
+                    local m_data = alife_storage_manager.get_state()
+                    if not m_data.player_created_stashes then m_data.player_created_stashes = {} end
+                    m_data.player_created_stashes[se_obj.id] = "itm_backpack"
+                    level.map_add_object_spot_ser(se_obj.id, "treasure", "MYLOOT")
+                    local function drop_items(boxid)
+                        local obj = level.object_by_id(boxid)
+                        if obj then
+                            local function itr_inv(_, item)
+                                db.actor:transfer_item(item, obj)
+                                SendScriptCallback("actor_on_item_put_in_box", obj, item)
+                            end
+                            db.actor:iterate_ruck(itr_inv, nil)
+                            return true
+                        end
+                        return false
+                    end
+                    CreateTimeEvent(0, "actor_backpack", 0, drop_items, se_obj.id)
+                end
+            end, "inv_backpack", db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id())
+        elseif MPMain_STOGETHER.ClearInvOnDeath then
+            log("[MLEVELM] Clearing actor inventory. We dead")
+            local function itr_inv(_, item)
+                alife_release_full(item)
+            end
+            db.actor:iterate_ruck(itr_inv, nil)
+        end
+        -- RESURRECT AFTER DELAY
+        CreateTimeEvent(0, "resurrect_action", MPMain_STOGETHER.TimeEResurrect, function()
+            bind_stalker_ext.death_manager_mp(false, false)
+            MPMain_STOGETHER.IDead = false
+            -- reset animation...
+            GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 1)
+            return db.actor.health > 0.2
+        end)
+        -- Dead animation until we ressurecting...
+        GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 340000)
+        -- Show local picture and text
+        bind_stalker_ext.death_manager_mp(false, true)
     end
     bind_campfire.campfire_go_off = function(cf, obj)
         local cf = cf or get_nearby_campfire(dist_cf, true)
@@ -871,7 +860,7 @@ function Patch()
             local npc = level.object_by_id(id)
             if npc and IsStalker(npc) and npc:alive() then
                 if npc:see(db.actor) then
-                    printf('%s saw player plant %s', npc:name(), se_planted:name())
+                    printf('%s saw player plant %s', npc:name(), planted_se:name())
                     cache.witnesses[id] = now + math.random(MIN_FORGET_TIME, MAX_FORGET_TIME) * level.get_time_factor()
                 end
             end
@@ -1583,21 +1572,15 @@ function Patch()
                 end
             end
         end
-        for squad_id, _ in pairs(SIMBOARD.squads) do
-            local squad = sim:object(squad_id)
-            if squad then
-                for k in squad:squad_members() do
-                    local id = k.id
-                    local se_obj = sim:object(id)
-                    if se_obj and IsStalker(nil, se_obj:clsid()) and se_obj:alive() then
-                        local comm = se_obj:community()
-                        if comm ~= "zombied" and comm ~= "trader" and comm ~= "arena_enemy" then
-                            local sid = get_object_story_id(id) 
-                            if not sid then
-                                if se_obj:rank() > client_rank then
-                                    client_place = client_place + 1
-                                end
-                            end
+        for i = 1, 65534 do
+            local se_obj = sim:object(i)
+            if se_obj and IsStalker(nil, se_obj:clsid()) and se_obj:alive() then
+                local comm = se_obj:community()
+                if comm ~= "zombied" and comm ~= "trader" and comm ~= "arena_enemy" then
+                    local sid = get_object_story_id(i) 
+                    if not sid then
+                        if se_obj:rank() > client_rank then
+                            client_place = client_place + 1
                         end
                     end
                 end
@@ -2016,188 +1999,6 @@ function engine_perform_special_sync(id, ToPlayerNetID)
     end)
 end
 
--- Downed & Revive Cooperative Mechanic
-downed_start_time = nil
-downed_pos = nil
-space_hold_start = nil
-
-function enter_downed_state()
-    if MPMain_STOGETHER.IsDowned then return end
-    
-    MPMain_STOGETHER.IsDowned = true
-    downed_start_time = time_global()
-    downed_pos = db.actor:position()
-    space_hold_start = nil
-    
-    -- Set invulnerability to prevent dying while downed
-    if bind_stalker_ext then
-        bind_stalker_ext.invulnerable_time = time_global() + 9999999
-    end
-    
-    -- Set health to low stable level so they are "downed" but not dead
-    db.actor:set_health_ex(0.2)
-    db.actor.bleeding = 1  -- Stop bleeding
-    
-    -- Safely hide weapon without breaking input (allowing Space to work)
-    if not MPMain_STOGETHER.weapon_hidden then
-        db.actor:hide_weapon()
-        MPMain_STOGETHER.weapon_hidden = true
-    end
-    
-    local hud = get_hud()
-    if hud then hud:HidePdaMenu() end
-    
-    -- Switch to 3rd person free camera so the player sees themselves on the ground
-    get_console():execute("cam_3")
-    
-    -- Play wounded loop animation
-    GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 340000)
-    
-    -- Synchronize downed state to other players
-    local my_netid = GameManager:GetMySNETID()
-    GameManager:OnICustomScriptAction("MPMain_GamePatches_STOGETHER", "remote_set_player_downed", serialize_table_simple({my_netid, true}), false)
-    
-    log("-[MP] We entered Downed state!")
-end
-
-function execute_resurrect()
-    MPMain_STOGETHER.IsDowned = false
-    MPMain_STOGETHER.IDead = true
-    
-    -- Restore normal invulnerability (5 seconds)
-    if bind_stalker_ext then
-        bind_stalker_ext.invulnerable_time = time_global() + 5000
-    end
-    
-    -- Remove downed HUD
-    local hud = get_hud()
-    if hud then
-        hud:RemoveCustomStatic("text_on_screen_center")
-    end
-    
-    -- Restore weapon safely using the flag
-    if db.actor and MPMain_STOGETHER.weapon_hidden then
-        db.actor:restore_weapon()
-        MPMain_STOGETHER.weapon_hidden = false
-    end
-    
-    -- Return to 1st person view
-    get_console():execute("cam_1")
-    
-    -- Broadcast downed state cleared
-    local my_netid = GameManager:GetMySNETID()
-    GameManager:OnICustomScriptAction("MPMain_GamePatches_STOGETHER", "remote_set_player_downed", serialize_table_simple({my_netid, false}), false)
-    
-    -- Clear downed visual animation
-    GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 1)
-    
-    -- Drop or clear inventory if enabled
-    if MPMain_STOGETHER.DropInvOnDeath then
-        log("[MLEVELM] Dropping actor inventory. We dead")
-        alife_create_awaite(function(se_obj)
-            if se_obj then
-                local m_data = alife_storage_manager.get_state()
-                if not m_data.player_created_stashes then m_data.player_created_stashes = {} end
-                m_data.player_created_stashes[se_obj.id] = "itm_backpack"
-                level.map_add_object_spot_ser(se_obj.id, "treasure", "MYLOOT")
-                local function drop_items(boxid)
-                    local obj = level.object_by_id(boxid)
-                    if obj then
-                        local function itr_inv(_, item)
-                            db.actor:transfer_item(item, obj)
-                            SendScriptCallback("actor_on_item_put_in_box", obj, item)
-                        end
-                        db.actor:iterate_ruck(itr_inv, nil)
-                        return true
-                    end
-                    return false
-                end
-                CreateTimeEvent(0, "actor_backpack", 0, drop_items, se_obj.id)
-            end
-        end, "inv_backpack", db.actor:position(), db.actor:level_vertex_id(), db.actor:game_vertex_id())
-    elseif MPMain_STOGETHER.ClearInvOnDeath then
-        log("[MLEVELM] Clearing actor inventory. We dead")
-        local function itr_inv(_, item)
-            alife_release_full(item)
-        end
-        db.actor:iterate_ruck(itr_inv, nil)
-    end
-    
-    -- If Resurrect is disabled, giving up or bleeding out means actual death
-    if not MPMain_STOGETHER.AllowResurrect then
-        -- Don't clear IDead so they stay dead
-        db.actor:kill(db.actor)
-        return
-    end
-
-    -- Run normal resurrect/respawn logic (teleport to camp/campfire, restore health, etc.)
-    bind_stalker_ext.death_manager_mp(false, false)
-    MPMain_STOGETHER.IDead = false
-end
-
-function execute_revive(health_amount, reviver_name)
-    MPMain_STOGETHER.IsDowned = false
-    MPMain_STOGETHER.IDead = false
-    
-    -- Restore health and vital stats
-    db.actor:set_health_ex(health_amount)
-    db.actor.power = 1
-    db.actor.radiation = 0
-    db.actor.bleeding = 1
-    db.actor.satiety = 1
-    db.actor.psy_health = 1
-    if arszi_psy then arszi_psy.set_psy_health(1.0) end
-    if bind_stalker_ext then bind_stalker_ext.invulnerable_time = time_global() + 5000 end
-    
-    -- Clear downed visual animation
-    GameManager:OnICustomAnimation("waunded_1_idle_0", "", true, 1) -- Reset anim
-    
-    -- Restore weapon safely using the flag
-    if db.actor and MPMain_STOGETHER.weapon_hidden then
-        db.actor:restore_weapon()
-        MPMain_STOGETHER.weapon_hidden = false
-    end
-    
-    -- Return to 1st person view
-    get_console():execute("cam_1")
-    
-    -- Restore input and UI
-    bind_stalker_ext.clear_death_logo()
-    
-    -- Remove downed HUD elements
-    local hud = get_hud()
-    if hud then
-        hud:RemoveCustomStatic("text_on_screen_center")
-    end
-    
-    -- Broadcast chat notification
-    local my_name = GameManager:GetNickName() or "Player"
-    local msg = string.format("%s revived %s!", tostring(reviver_name), tostring(my_name))
-    news_manager.send_tip(db.actor, msg, nil, "nano", 10000, nil, true)
-end
-
-function remote_set_player_downed(tbl)
-    if not tbl then return end
-    local netid = tbl[1]
-    local state = tbl[2]
-    if netid ~= nil then
-        MPMain_STOGETHER.DownedPlayers[netid] = state
-        log("-[MP] Player downed state sync: " .. tostring(netid) .. " -> " .. tostring(state))
-    end
-end
-
-function remote_revive_player(tbl)
-    if not tbl then return end
-    local target_netid = tbl[1]
-    local reviver_name = tbl[2]
-    local health_amount = tbl[3] or 0.4
-    
-    if target_netid == GameManager:GetMySNETID() then
-        log("-[MP] We have been revived by " .. tostring(reviver_name))
-        execute_revive(health_amount, reviver_name)
-    end
-end
-
 function remote_sync_rank(tbl)
     if not db.actor then return end
     local netid = tbl[3]
@@ -2223,264 +2024,6 @@ function remote_sync_rank(tbl)
     end
 end
 
--- =============================================================================
--- CORPSE (RAGDOLL) POSITION SYNCHRONIZATION
--- Host broadcasts dead NPC/monster positions every 5 seconds.
--- Clients apply the received positions if the corpse has drifted > 1 m.
--- =============================================================================
-
-local corpse_sync_timer = 0
-local CORPSE_SYNC_INTERVAL = 2000 -- ms
-local pending_grenade_syncs = {}
-local pending_corpse_syncs = {}
-
-local function teleport_physics_object(obj, target_pos)
-    if not obj then return end
-    local shell = obj.get_physics_shell and obj:get_physics_shell()
-    if shell then
-        shell:deactivate()
-        obj:set_position(target_pos)
-        shell:activate()
-    else
-        if obj.set_npc_position then
-            obj:set_npc_position(target_pos)
-        elseif obj.set_position then
-            obj:set_position(target_pos)
-        end
-    end
-end
-
--- Gathers all dead objects on the level and broadcasts their positions.
--- Called only on the Host inside actor_on_update.
-function SyncCorpses(tg)
-    if not IIsHost() then return end
-    if tg - corpse_sync_timer < CORPSE_SYNC_INTERVAL then return end
-    corpse_sync_timer = tg
-
-    local payload = {}
-    local count = 0
-
-    -- Scan online stalkers and monsters via db.storage (highly optimized)
-    for id, t in pairs(db.storage) do
-        local obj = t.object
-        if obj and not obj:alive() then
-            if IsStalker(obj) or IsMonster(obj) then
-                local pos = obj:position()
-                count = count + 1
-                payload[count] = { id, pos.x, pos.y, pos.z }
-            end
-        end
-    end
-
-    if count == 0 then return end
-
-    -- Send in chunks of 20 to stay under packet size limits
-    local chunk = {}
-    local ci = 0
-    for i = 1, count do
-        ci = ci + 1
-        chunk[ci] = payload[i]
-        if ci >= 20 or i == count then
-            GameManager:OnICustomScriptAction(
-                "MPMain_GamePatches_STOGETHER", "remote_sync_corpses",
-                serialize_table_simple(chunk), false, 0)
-            chunk = {}
-            ci = 0
-        end
-    end
-end
-
--- Called on Clients when the Host broadcasts corpse positions.
-function remote_sync_corpses(tbl)
-    if not tbl then return end
-    for _, entry in ipairs(tbl) do
-        local id   = entry[1]
-        local x, y, z = entry[2], entry[3], entry[4]
-        if id and x then
-            local lid = GameManager:GetLocalIDByServerID(id)
-            if not lid or lid == -1 then
-                pending_corpse_syncs[id] = entry
-            else
-                local obj = level.object_by_id(lid)
-                if not obj then
-                    pending_corpse_syncs[id] = entry
-                elseif not obj:alive() then
-                    local cur = obj:position()
-                    local dx  = cur.x - x
-                    local dy  = cur.y - y
-                    local dz  = cur.z - z
-                    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                    if dist > 1.5 then
-                        local target_pos = vector():set(x, y, z)
-                        teleport_physics_object(obj, target_pos)
-                    end
-                end
-            end
-        end
-    end
-end
-
-local pending_sync_timer = 0
-function ProcessPendingObjectSyncs()
-    local tg = time_global()
-    if tg - pending_sync_timer < 500 then return end
-    pending_sync_timer = tg
-
-    for srv_id, tbl in pairs(pending_grenade_syncs) do
-        local lid = GameManager:GetLocalIDByServerID(srv_id)
-        if lid and lid ~= -1 then
-            local obj = level.object_by_id(lid)
-            if obj then
-                local x, y, z = tbl[2], tbl[3], tbl[4]
-                local target_pos = vector():set(x, y, z)
-                teleport_physics_object(obj, target_pos)
-                pending_grenade_syncs[srv_id] = nil
-            end
-        end
-    end
-
-    for id, entry in pairs(pending_corpse_syncs) do
-        local lid = GameManager:GetLocalIDByServerID(id)
-        if lid and lid ~= -1 then
-            local obj = level.object_by_id(lid)
-            if obj and not obj:alive() then
-                local x, y, z = entry[2], entry[3], entry[4]
-                local target_pos = vector():set(x, y, z)
-                local cur = obj:position()
-                local dx  = cur.x - x
-                local dy  = cur.y - y
-                local dz  = cur.z - z
-                local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-                if dist > 1.5 then
-                    teleport_physics_object(obj, target_pos)
-                end
-                pending_corpse_syncs[id] = nil
-            end
-        end
-    end
-end
-
--- =============================================================================
--- GRENADE / PROJECTILE POSITION SYNCHRONIZATION
--- The Host watches for newly online grenade objects and broadcasts their
--- position + velocity to all Clients every update tick while they are airborne.
--- =============================================================================
-
-local tracked_grenades = {} -- [srv_id] = { srv_id, broadcast = 0 }
-local GRENADE_CLSIDS = nil  -- lazily built
-
-local function build_grenade_clsids()
-    if GRENADE_CLSIDS then return end
-    GRENADE_CLSIDS = {}
-    -- Common grenade class IDs present in STALKER engine
-    local names = {
-        "wpn_grenade_f1_s", "wpn_grenade_rgd5_s",
-        "wpn_grenade_f1",   "wpn_grenade_rgd5",
-        "grenade_f1_s",     "grenade_rgd5_s",
-        "grenade_f1",       "grenade_rgd5",
-        "wpn_grenade_fake_s","smoke_grenade_s",
-    }
-    for _, n in ipairs(names) do
-        if clsid[n] then
-            GRENADE_CLSIDS[clsid[n]] = true
-        end
-    end
-    -- Fallback: search all clsid entries for "grenade" if clsid is a table.
-    if type(clsid) == "table" then
-        for k, v in pairs(clsid) do
-            if type(k) == "string" and k:find("grenade") then
-                GRENADE_CLSIDS[v] = true
-            end
-        end
-    end
-end
-
--- Callback registered to listen for object registration on Host
-function OnServerEntityRegister(se_obj, class_name)
-    if not IIsHost() then return end
-    if not se_obj then return end
-    build_grenade_clsids()
-    if GRENADE_CLSIDS[se_obj:clsid()] then
-        log("-[MP] Grenade spawned: " .. tostring(se_obj.id))
-        tracked_grenades[se_obj.id] = { srv_id = se_obj.id, broadcast = 0 }
-    end
-end
-
--- Callback registered to listen for object unregistration on Host
-function OnServerEntityUnregister(se_obj)
-    if not IIsHost() then return end
-    if not se_obj then return end
-    if tracked_grenades[se_obj.id] then
-        log("-[MP] Grenade released: " .. tostring(se_obj.id))
-        tracked_grenades[se_obj.id] = nil
-    end
-end
-
-local grenade_update_timer = 0
-local GRENADE_UPDATE_INTERVAL = 100 -- ms, 10 times/sec
-
--- Called only on Host inside actor_on_update (via on_game_load hook).
-function SyncGrenades(tg)
-    if not IIsHost() then return end
-    if tg - grenade_update_timer < GRENADE_UPDATE_INTERVAL then return end
-    grenade_update_timer = tg
-
-    -- Broadcast all known grenades
-    for id, info in pairs(tracked_grenades) do
-        local lid = GameManager:GetLocalIDByServerID(id)
-        if lid and lid ~= -1 then
-            local obj = level.object_by_id(lid)
-            if obj then
-                local pos = obj:position()
-                local vel = obj.get_velocity and obj:get_velocity() or vector():set(0,0,0)
-                GameManager:OnICustomScriptAction(
-                    "MPMain_GamePatches_STOGETHER", "remote_sync_grenade",
-                    serialize_table_simple({ info.srv_id, pos.x, pos.y, pos.z, vel.x, vel.y, vel.z }),
-                    false, 0)
-            end
-        end
-    end
-end
-
--- Called on Clients to apply grenade positions received from Host.
-function remote_sync_grenade(tbl)
-    if not tbl then return end
-    local srv_id = tbl[1]
-    local x, y, z   = tbl[2], tbl[3], tbl[4]
-    local vx, vy, vz = tbl[5], tbl[6], tbl[7]
-    if not (srv_id and x) then return end
-
-    local lid = GameManager:GetLocalIDByServerID(srv_id)
-    if not lid or lid == -1 then
-        pending_grenade_syncs[srv_id] = tbl
-        return
-    end
-
-    local obj = level.object_by_id(lid)
-    if not obj then
-        pending_grenade_syncs[srv_id] = tbl
-        return
-    end
-
-    local cur = obj:position()
-    local dx = cur.x - x
-    local dy = cur.y - y
-    local dz = cur.z - z
-    local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
-
-    -- Only snap if more than 2.5 m off (ignore tiny float errors and prevent rubber-banding against local physics engine)
-    if dist > 2.5 then
-        local target_pos = vector():set(x, y, z)
-        teleport_physics_object(obj, target_pos)
-        local shell = obj.get_physics_shell and obj:get_physics_shell()
-        if shell then
-            shell:set_linear_vel(vector():set(vx, vy, vz))
-        end
-    end
-end
-
--- =============================================================================
-
 function on_entity_death(victim, killer)
     if not (victim and killer) then return end
     local payload = { killer:id(), killer:character_rank(), IsActor(killer) and killer:GetNetID() or false, IsMonster(victim) }
@@ -2491,8 +2034,6 @@ function on_game_load()
     if IIsHost() then
         RegisterScriptCallback("npc_on_death_callback", on_entity_death)
         RegisterScriptCallback("monster_on_death_callback", on_entity_death)
-        RegisterScriptCallback("server_entity_on_register", OnServerEntityRegister)
-        RegisterScriptCallback("server_entity_on_unregister", OnServerEntityUnregister)
     end
 end
 
@@ -2515,40 +2056,4 @@ function on_game_start()
             MP_PDA_CACHE = m_data.MP_PDA_CACHE or {}
         end
     end)
-end
-
-function UnstuckPlayer()
-    log("-[MP] Unstuck player requested!")
-    
-    -- 1. Cancel custom multiplayer animations
-    if GameManager and GameManager.OnICustomAnimation then
-        GameManager:OnICustomAnimation("", "", true, 0.1)
-    end
-    
-    -- 2. Reset input and key locks
-    _G.KEYS_UNLOCK = true
-    _G.KEYS_LOCK = false
-    
-    -- 3. Clear registered UI tables
-    _G.RES_GUIs = {}
-    
-    -- 4. Restore weapons safely
-    if db.actor and MPMain_STOGETHER.weapon_hidden then
-        db.actor:restore_weapon()
-        MPMain_STOGETHER.weapon_hidden = false
-    end
-    get_console():execute("cam_1")
-    
-    -- 5. Remove camera effectors
-    for i = 1, 100 do
-        level.remove_cam_effector(i)
-    end
-    
-    -- 6. Re-enable engine level inputs
-    level.enable_input()
-    
-    -- Inform player
-    if db.actor then
-        news_manager.send_tip(db.actor, "Unstuck executed. Input and animations reset.", nil, "nano", 5000)
-    end
 end

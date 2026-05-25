@@ -64,40 +64,6 @@ function OnPlayerDisconnected(PlayerNetID, NickName)
     log("[Server] On Player Disconnected")
     log("[Server] PlayerID: "..tostring(PlayerNetID))
     log("[Server] PlayerNA: "..tostring(NickName))
-
-    -- NPC lock cleanup
-    local busied = MPMain_QuestPatches_STOGETHER.get_busied_npcs()
-    if busied then
-        for id, bstbl in pairs(busied) do
-            if bstbl.netid == PlayerNetID then
-                local server_id = GameManager:GetServerIDByLocalID(id)
-                local payload = { id = server_id, busy = false, netid = PlayerNetID }
-                -- Broadcast unlock to all clients
-                GameManager:OnICustomScriptAction("dialogs", "remote_configure_npc", serialize_table_simple(payload), false)
-                -- Also unlock locally on host
-                local npc = level.object_by_id(id)
-                if npc then
-                    npc:set_nonscript_usable(true)
-                    npc:enable_talk()
-                end
-                busied[id] = nil
-            end
-        end
-    end
-
-    -- Broadcast disconnect notification to all clients' chatbox
-    GameManager:OnICustomScriptAction("MClientCall_STOGETHER", "OnPlayerDisconnectedClient", NickName, false)
-
-    -- Local notification on host
-    if db.actor then
-        local mss = "Player "..tostring(NickName).." disconnected"
-        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
-        local mchatclass = MChatbox_STOGETHER.GetChatBox()
-        if mchatclass then
-            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
-            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 100, 100))
-        end
-    end
 end
 
 function OnPlayerChatted(PlayerNetID, NickName, MSG)

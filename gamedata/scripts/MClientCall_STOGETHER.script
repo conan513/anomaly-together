@@ -23,25 +23,8 @@ function OnPlayerConnected(PlayerNetID, NickName)
     if db.actor then
         local mss = "Player "..tostring(NickName).." connected to level: "..tostring(level.name())
         news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
-        local mchatclass = MChatbox_STOGETHER.GetChatBox()
-        if mchatclass then
-            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
-            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 200, 50))
-        end
     end
     SendScriptCallback("onmp_player_connected", PlayerNetID, NickName)
-end
-
-function OnPlayerDisconnectedClient(NickName)
-    if db.actor then
-        local mss = "Player "..tostring(NickName).." disconnected"
-        news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
-        local mchatclass = MChatbox_STOGETHER.GetChatBox()
-        if mchatclass then
-            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
-            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 100, 100))
-        end
-    end
 end
 
 function OnPlayerChangedLevel(PlayerNetID, SE_OBJ, NickName)
@@ -51,24 +34,16 @@ function OnPlayerChangedLevel(PlayerNetID, SE_OBJ, NickName)
     if db.actor then
         local mss = "Player "..tostring(NickName).." changing level"
         news_manager.send_tip(db.actor, mss, nil, "nano", 20000)
-        local mchatclass = MChatbox_STOGETHER.GetChatBox()
-        if mchatclass then
-            local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
-            mchatclass:AddMessage(time_str .. mss, GetARGB(255, 255, 200, 50))
-        end
     end
     SendScriptCallback("onmp_player_changed_level", PlayerNetID, SE_OBJ, NickName)
 end
 
 function OnPlayerChatted(PlayerNetID, NickName, MSG)
-    local is_me = db.actor and NickName == db.actor:character_name()
-    local color = is_me and GetARGB(255, 100, 200, 255) or GetARGB(255, 100, 255, 100)
-    local time_str = level.present() and string.format("[%02d:%02d] ", level.get_time_hours(), level.get_time_minutes()) or ""
-    local mss = time_str .. NickName.."> "..tostring(MSG)
+    local mss = NickName.."> "..tostring(MSG)
     news_manager.send_tip(db.actor, mss, nil, "freedom2", 20000)
     local mchatclass = MChatbox_STOGETHER.GetChatBox()
     if mchatclass then
-        mchatclass:AddMessage(mss, color)
+        mchatclass:AddMessage(mss)
     end
     SendScriptCallback("onmp_player_chatted_message", PlayerNetID, NickName, MSG)
 end

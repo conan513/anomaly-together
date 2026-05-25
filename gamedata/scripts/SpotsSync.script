@@ -72,22 +72,12 @@ function sync_story_npc_markers(SNETID)
 
     local marker_list = {}
     local sim = alife()
-    local checked = {}
-    for squad_id, _ in pairs(SIMBOARD.squads) do
-        local squad = sim:object(squad_id)
-        if squad then
-            for k in squad:squad_members() do
-                local id = k.id
-                if not checked[id] then
-                    checked[id] = true
-                    local se_obj = sim:object(id)
-                    if se_obj and IsStalker(se_obj) then
-                        for _, spot in ipairs(important_spots) do
-                            if level.map_has_object_spot(id, spot) ~= 0 then
-                                marker_list[#marker_list + 1] = { id, spot }
-                            end
-                        end
-                    end
+    for i = 1, 65534 do
+        local se_obj = sim:object(i)
+        if se_obj and IsStalker(se_obj) then
+            for _, spot in ipairs(important_spots) do
+                if level.map_has_object_spot(i, spot) ~= 0 then
+                    marker_list[#marker_list + 1] = { i, spot }
                 end
             end
         end
@@ -300,23 +290,9 @@ end
 function on_game_load()
 end
 
-local last_update_time = 0
-local UPDATE_INTERVAL = 3000
-
-function actor_on_update()
-    if IIsHost() then return end
-    local tg = time_global()
-    if tg - last_update_time > UPDATE_INTERVAL then
-        last_update_time = tg
-        render_pda_spots()
-        cleanup_stale_spots()
-    end
-end
-
 function on_game_start()
     RegisterScriptCallback("on_game_load", on_game_load)
     RegisterScriptCallback("npc_on_death_callback", on_client_object_death)
     RegisterScriptCallback("actor_item_to_slot", on_item_to_slot)
     RegisterScriptCallback("actor_item_to_ruck", on_item_to_ruck)
-    RegisterScriptCallback("actor_on_update", actor_on_update)
 end

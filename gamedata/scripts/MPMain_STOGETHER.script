@@ -19,52 +19,12 @@ ClearInvOnDeath = ui_mcm and ui_mcm.get("werasik2aa/clear_inv") or false
 DropInvOnDeath = ui_mcm and ui_mcm.get("werasik2aa/drop_inv") or false
 MaxPlayers = ui_mcm and ui_mcm.get("werasik2aa/max_players") or 3
 FriendlyFire = ui_mcm and ui_mcm.get("werasik2aa/friendly_fire") or false
-TransferAllToLevel = (not ui_mcm) or (ui_mcm.get("werasik2aa/transvestit_to_level") ~= false)
+TransferAllToLevel = ui_mcm and ui_mcm.get("werasik2aa/transvestit_to_level") or true
 SectionExistCheck = ui_mcm and ui_mcm.get("werasik2aa/sections_check") or false
 ChatKeyBind = ui_mcm and ui_mcm.get("werasik2aa/p2p_peer_chat") or DIK_keys.DIK_RMENU
 ShowStats = ui_mcm and ui_mcm.get("werasik2aa/show_stats") or false
 AllowResurrect = ui_mcm and ui_mcm.get("werasik2aa/resurrect_allow") or false
-AllowDowned = ui_mcm and ui_mcm.get("werasik2aa/downed_allow") or false
 TimeEResurrect = ui_mcm and ui_mcm.get("werasik2aa/resurrect_timeout") or 1
-IsDowned = false
-DownedPlayers = {}
-
-_G.MP_Originals = _G.MP_Originals or {}
-
-function _G.RegisterPatch(tbl, key, client_func, server_func)
-    if not tbl then return end
-    
-    if _G.MP_Originals[tbl] == nil then
-        _G.MP_Originals[tbl] = {}
-    end
-    if _G.MP_Originals[tbl][key] == nil then
-        _G.MP_Originals[tbl][key] = tbl[key] or "NIL"
-    end
-    
-    tbl[key] = function(...)
-        if IIsHost() then
-            if server_func then
-                return server_func(...)
-            else
-                local orig = _G.MP_Originals[tbl][key]
-                if orig ~= "NIL" and orig ~= nil then
-                    return orig(...)
-                end
-            end
-        else
-            if client_func then
-                return client_func(...)
-            else
-                local orig = _G.MP_Originals[tbl][key]
-                if orig ~= "NIL" and orig ~= nil then
-                    return orig(...)
-                end
-            end
-        end
-    end
-end
-
-
 
 -- COP/COC/SHOC FIXES
 if IS_GAME_SHOC_SCOC_SCOP_ then
@@ -345,7 +305,6 @@ if IS_GAME_SHOC_SCOC_SCOP_ then
                 printf("~ alife_release [%s] (%s) | %s", se_obj:section_name(), se_obj.id, msg)
             end
             -- NPC
-            local cls = se_obj:clsid()
             if IsStalker(nil,cls) or IsMonster(nil,cls) then
                 local squad = se_obj.group_id and se_obj.group_id ~= 65535 and alife_object(se_obj.group_id)
                 if squad then
@@ -472,7 +431,7 @@ _G.IsSquad = function(o, c)
 end
 _G.IsFood = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	local ptrs = {
 		["i_food"] = true,
 		["i_mutant_cooked"] = true,
@@ -481,12 +440,12 @@ _G.IsFood = function(o)
 end
 _G.IsMedical = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	return d == "i_medical"
 end
 _G.IsMedKit = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	if d == "i_medical" then
 		if string.match(str, "medkit") then return true end
 	end
@@ -494,7 +453,7 @@ _G.IsMedKit = function(o)
 end
 _G.IsTablets = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	if d == "i_medical" then
 		if string.match(str, "drug_") or str == "antirad_kalium" or str == "yadylin" or str == "akvatab" then return true end
 	end
@@ -502,7 +461,7 @@ _G.IsTablets = function(o)
 end
 _G.IsBandages = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	if d == "i_medical" then
 		local ptsr = {
 			["bandage"] = true,
@@ -516,7 +475,7 @@ _G.IsBandages = function(o)
 end
 _G.IsDrugs = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	if d == "i_medical" then
 		local ptrs = {
 			["glucose"] = true,
@@ -535,17 +494,17 @@ _G.IsDrugs = function(o)
 end
 _G.IsBowl = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	return d == "i_mutant_cooked"
 end
 _G.IsDrink = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	return d == "i_drink"
 end
 _G.IsCigar = function(o)
 	local str = type(o) ~= "string" and (o.section_name and o:section_name() or o.section and o:section()) or o
-	local d = ini_sys:r_string_ex(str, "kind")
+	local d = ini_sys:r_string(str, "kind")
 	local ptrs = {
 		["i_food"] = true,
 		["i_drink"] = true
@@ -662,8 +621,8 @@ _G.alife_create_awaite = function(funca,sec,pos,lid,gid,id,state)
     else
         GameManager:OnQuestSpawner(se_obj)
         alife():release(se_obj)
-        local ev_id = "await_" .. tostring(time_global()) .. "_" .. tostring(math.random(10000))
-        CreateTimeEvent(ev_id, ev_id, 0.1, function (DTIMEWAIT)
+        -- wait 5 secs for spawned and call funca
+        CreateTimeEvent(0, "TIME_EVENT_AWAIT", 0.1, function (DTIMEWAIT)
             if time_global() > DTIMEWAIT then
                 callstack()
                 log("![ERROR] Failed to catch entity. Host refuse that spawn or failed to spawn?")
@@ -736,8 +695,8 @@ _G.alife_create_special_awaite = function(funca, special, sec,pos,lid,gid,id,sta
         special(se_obj)
         GameManager:OnQuestSpawner(se_obj)
         alife():release(se_obj)
-        local ev_id = "await_" .. tostring(time_global()) .. "_" .. tostring(math.random(10000))
-        CreateTimeEvent(ev_id, ev_id, 0.1, function (DTIMEWAIT)
+        -- wait 5 secs for spawned and call funca
+        CreateTimeEvent(0, "TIME_EVENT_AWAIT", 0.1, function (DTIMEWAIT)
             if time_global() > DTIMEWAIT then
                 callstack()
                 log("![ERROR] Failed to catch entity. Host refuse that spawn or failed to spawn?")
@@ -871,12 +830,11 @@ function RestoreValues()
     DropInvOnDeath = ui_mcm and ui_mcm.get("werasik2aa/drop_inv") or false
     MaxPlayers = ui_mcm and ui_mcm.get("werasik2aa/max_players") or 3
     FriendlyFire = ui_mcm and ui_mcm.get("werasik2aa/friendly_fire") or false
-    TransferAllToLevel = (not ui_mcm) or (ui_mcm.get("werasik2aa/transvestit_to_level") ~= false)
+    TransferAllToLevel = ui_mcm and ui_mcm.get("werasik2aa/transvestit_to_level") or true
     SectionExistCheck = ui_mcm and ui_mcm.get("werasik2aa/sections_check") or false
     ChatKeyBind = ui_mcm and ui_mcm.get("werasik2aa/p2p_peer_chat") or DIK_keys.DIK_RMENU
     ShowStats = ui_mcm and ui_mcm.get("werasik2aa/show_stats") or false
     AllowResurrect = ui_mcm and ui_mcm.get("werasik2aa/resurrect_allow") or false
-    AllowDowned = ui_mcm and ui_mcm.get("werasik2aa/downed_allow") or false
     TimeEResurrect = ui_mcm and ui_mcm.get("werasik2aa/resurrect_timeout") or 1
     --SETTUP PREFERENCES
     GameManager:SetMaxPlayers(MaxPlayers)
@@ -943,9 +901,7 @@ _G.serialize_table_simple = function(tbl)
             result = result .. serialize_table_simple(value)
         elseif type(value) == "userdata" then
             if value.x and value.y and value.z then
-                local v = { value.x, value.y, value.z }
-                if value.w then v[4] = value.w end
-                result = result .. serialize_table_simple(v)
+                result = result .. serialize_table_simple({ value.x, value.y, value.z, value.w or nil })
             end
         end
     end

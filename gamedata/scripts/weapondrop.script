@@ -1,0 +1,65 @@
+--[[
+[================]
+Description: WeaponDrop in body to client script by EnotPenetrator.
+Version: Togetheer 2.0 Patch 5
+C++ Programmer & Author: Werasik2aa
+Project Creator: Monokit
+Script Сreator: EnotPenetrator
+[================]
+--]]
+
+printf("[WeaponDrop] Loading...")
+
+if not IIsHost() then
+    return
+end
+
+local processed_npcs = {}
+local processed_weapons = {}
+
+RegisterScriptCallback("npc_on_death_callback", function(victim, killer)
+    if not victim or victim:alive() or IsMonster(victim) then return end
+    
+    local npc_id = victim:id()
+    if processed_npcs[npc_id] then 
+        return 
+    end
+    processed_npcs[npc_id] = true
+    
+    local weapon = victim:active_item()
+    
+    if weapon and IsWeapon(weapon) and not IsMelee(weapon) then
+    else
+        weapon = victim:item_in_slot(3) or victim:item_in_slot(2) or victim:item_in_slot(1)
+    end
+    
+    if not weapon then return end
+    
+    local weapon_id = weapon:id()
+    local weapon_section = weapon:section()
+	
+    local transfer_executed = false
+    local timer_name = "transfer_" .. weapon_id
+    
+    CreateTimeEvent(0, timer_name, 0.1, function()
+        if transfer_executed then
+            pcall(function() RemoveTimeEvent(timer_name) end)
+            return false
+        end
+        
+        transfer_executed = true
+        
+        local weapon_on_ground = level.object_by_id(weapon_id)
+        
+        if weapon_on_ground then
+            pcall(function()
+                victim:transfer_item(weapon_on_ground, victim)
+                processed_weapons[weapon_id] = nil
+				processed_npcs[npc_id] = nil
+            end)
+        end
+        
+        pcall(function() RemoveTimeEvent(timer_name) end)
+        return false
+    end)
+end)

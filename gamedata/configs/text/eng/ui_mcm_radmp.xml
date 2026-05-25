@@ -20,10 +20,7 @@
 		<string id="ui_mcm_werasik2aa_transvestit_to_level">
 		<text>[Сервер] Transfer players to another level</text>
 	</string>
-	<string id="ui_mcm_werasik2aa_downed_allow">
-                <text>Allow Downed state (requires Resurrect enabled)</text>
-        </string>
-        <string id="ui_mcm_werasik2aa_resurrect_allow">
+	<string id="ui_mcm_werasik2aa_resurrect_allow">
 		<text>Allow resurrect</text>
 	</string>
 	<string id="ui_mcm_werasik2aa_resurrect_timeout">

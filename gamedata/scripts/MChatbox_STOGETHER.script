@@ -54,18 +54,7 @@ end
 function ChatBox:Send()
     local input = self.chat_input:GetText()
     if input and input ~= "" and input ~= " " then
-        if input:sub(1, 1) == "/" then
-            local cmd = input:sub(2):lower()
-            if cmd == "unstuck" or cmd == "reset" or cmd == "reset_anim" then
-                MPMain_GamePatches_STOGETHER.UnstuckPlayer()
-            else
-                if db.actor then
-                    news_manager.send_tip(db.actor, "Unknown command: " .. input, nil, "nano", 5000)
-                end
-            end
-        else
-            MPMain_STOGETHER.GameManager:OnIChatMSG(input)
-        end
+        MPMain_STOGETHER.GameManager:OnIChatMSG(input)
         self.chat_input:SetText("")
     end
     self:Close()
@@ -73,23 +62,14 @@ end
 function ChatBox:IsShown()
     return self.showed
 end
-function ChatBox:AddMessage(TEXT, COLOR)
-    for n = 0, self.max_lines - 1 do
-        local next_line = self.lines[n + 1]
-        if next_line then
-            self.lines[n]:SetText(next_line:GetText())
-            self.lines[n]:SetTextColor(next_line:GetTextColor())
-        end
-    end
-    local last_line = self.lines[self.max_lines]
-    if last_line then
-        last_line:SetText(TEXT)
-        if COLOR then
-            last_line:SetTextColor(COLOR)
-        else
-            last_line:SetTextColor(GetARGB(255, 255, 255, 255))
-        end
-    end
+function ChatBox:AddMessage(TEXT)
+    for n=1, #self.lines-1, 1 do
+		local s = self.lines[n+1]:GetText()
+		local clr = self.lines[n+1]:GetTextColor()
+		self.lines[n]:SetText(s)
+		self.lines[n]:SetTextColor(clr)
+	end
+    self.lines[#self.lines]:SetText(TEXT)
 end
 function ChatBox:Open(focu)
     self:ShowDialog()
