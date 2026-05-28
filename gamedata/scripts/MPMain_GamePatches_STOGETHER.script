@@ -1921,6 +1921,12 @@ function Patch()
         end
         return true
     end
+    xr_effects.anim_obj_forward = function(actor, npc, p)
+        for _, v in pairs(p) do
+            local obj = v and db.anim_obj_by_name[v]
+            if obj then obj:anim_forward() end
+        end
+    end
     MPMain_QuestPatches_STOGETHER.Patch()
     -- End of basic game fixes!
     -- Begin of patches for addons and other shit

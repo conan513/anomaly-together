@@ -88,7 +88,9 @@ function main_menu:InitCallBacks()
 	self:AddCallback("self",	ui_events.MAIN_MENU_RELOADED, self.OnMenuReloaded, self)
 end
 
-local GameManager = SteamGameManager()
+local GameManager = _G.SteamGameManager and SteamGameManager() or {
+	GetOurWebsite = function() end
+}
 function main_menu:OnButton_Advertising()
 	GameManager:GetOurWebsite("https://discord.gg/5cwkncCttb")
 end
