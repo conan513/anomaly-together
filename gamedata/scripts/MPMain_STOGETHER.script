@@ -845,6 +845,10 @@ function RestoreValues()
     GameManager:SetDrawNetworkStats(ShowStats)
 end
 
+if MPMain_STOGETHER then
+    MPMain_STOGETHER.RestoreValues = RestoreValues
+end
+
 function MPAttackCondition(entity, player)
     if not IIsHost() then return false end
     -- ��������, ��� ��� ����� ������

@@ -14,11 +14,17 @@ local function on_game_load()
     end
     MPMain_STOGETHER.GlobalLastPosition = db.actor:position()
     save_var(db.actor, "force_all_talk", true)
+    if MPMain_STOGETHER and MPMain_STOGETHER.RestoreValues then
+        MPMain_STOGETHER.RestoreValues()
+    end
 end
 local function actor_on_first_update()
     MPMain_STOGETHER.GameLoaded = true
     GameManager:SetGameLoaded(true)
     GameManager:OnRequest()
+    if MPMain_STOGETHER and MPMain_STOGETHER.RestoreValues then
+        MPMain_STOGETHER.RestoreValues()
+    end
 end
 local function on_key_press(key)
     if not db.actor then return end
