@@ -1,0 +1,493 @@
+--[[
+[================]
+M_NPC_Memory_STOGETHER.script
+Description: NPC Long-Term Memory, Rescue Detection, Faction Reputation, and Secret Stash system.
+Written for Anomaly Together multiplayer.
+
+Systems:
+ - Rescue Detection   : tracks nearby NPCs in combat with low HP; when actor kills a threat nearby,
+                        the endangered NPC is marked as "rescued".
+ - Faction Reputation : per-faction relationship score (-5 to +5), fully persisted via
+                        actor_on_save / actor_on_load packet callbacks.
+ - NPC Memory        : per-NPC persistent flag via save_var (survives saves, level transitions,
+                        A-Life online/offline cycles).
+ - Secret Stash      : rescued NPC procedurally spawns a backpack with supplies near their position;
+                        tier (1-3) scales with current faction reputation.
+ - PDA Thank-You     : immersive, delayed PDA message from the rescued NPC, personality-aware.
+[================]
+--]]
+
+-- ============================================================
+-- CONSTANTS
+-- ============================================================
+
+local RESCUE_RADIUS          = 35      -- metres: actor kill must happen within this range of the NPC
+local DANGER_HP_RATIO        = 0.60    -- NPC health (0.0-1.0) below this AND in combat = "in danger"
+local THANK_DELAY_MIN        = 5       -- seconds: minimum delay before PDA thank-you fires
+local THANK_DELAY_MAX        = 12      -- seconds: maximum delay before PDA thank-you fires
+local STASH_SPAWN_DELAY      = 22      -- seconds: delay before stash physically appears
+local DANGER_ENTRY_TIMEOUT   = 25000   -- ms: stale danger-entries are purged after this long without refresh
+local THANK_COOLDOWN         = 180000  -- ms: same NPC cannot be processed again within this window
+
+-- ============================================================
+-- FACTION METADATA
+-- ============================================================
+
+-- Ordered list used for deterministic packet write / read during save/load.
+-- DO NOT reorder without bumping the mod version.
+local FACTION_ORDER = {
+    "stalker", "dolg", "freedom", "csky",
+    "ecolog",  "killer", "army", "bandit", "monolith"
+}
+
+local FACTION_DISPLAY = {
+    stalker  = "Loner",
+    dolg     = "Duty",
+    freedom  = "Freedom",
+    csky     = "Clear Sky",
+    ecolog   = "Ecologist",
+    killer   = "Mercenary",
+    army     = "Military",
+    bandit   = "Bandit",
+    monolith = "Monolith",
+}
+
+-- ============================================================
+-- REPUTATION SYSTEM
+-- ============================================================
+
+-- In-memory table; loaded from packet on actor_on_load, written on actor_on_save.
+local rep_table = {}
+
+local function get_rep(faction)
+    return rep_table[faction] or 0
+end
+
+local function change_rep(faction, delta)
+    if not faction then return end
+    rep_table[faction] = math.max(-5, math.min(5, (rep_table[faction] or 0) + delta))
+end
+
+local function actor_on_save(packet)
+    -- Write 9 x u8 (shifted: value + 5 so -5..+5 becomes 0..10)
+    for _, fac in ipairs(FACTION_ORDER) do
+        packet:w_u8((rep_table[fac] or 0) + 5)
+    end
+end
+
+local function actor_on_load(reader)
+    rep_table = {}
+    for _, fac in ipairs(FACTION_ORDER) do
+        local raw = reader:r_u8()
+        rep_table[fac] = (raw or 5) - 5
+    end
+end
+
+-- ============================================================
+-- NEAREST LOCATION NAME HELPER
+-- ============================================================
+
+local smart_prefix_map = {
+    esc = "Cordon",          gar = "Garbage",       agr = "Agroprom",
+    val = "Dark Valley",     bar = "Rostok",         yan = "Yantar",
+    mil = "Army Warehouses", rad = "Radar",          lim = "Limansk",
+    pri = "Pripyat",         cit = "Dead City",      red = "Red Forest",
+    jup = "Jupiter",         zat = "Zaton",          mar = "Great Swamps",
+    ds  = "Darkscape",       trc = "Truck Cemetery",
+}
+
+local function get_location_near(pos)
+    if not pos then return "the Zone" end
+    local nearest = nil
+    local min_dist = 999999
+    for _, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local d = pos:distance_to(smart.position)
+            if d < min_dist then
+                min_dist = d
+                local raw = smart:name()
+                if raw then
+                    local prefix = string.match(raw, "^([%a%d]+)_")
+                    if prefix and smart_prefix_map[prefix] then
+                        nearest = smart_prefix_map[prefix]
+                    elseif level and level.name then
+                        local ln = level.name()
+                        nearest = ln and ln:gsub("^%l", string.upper) or "the Zone"
+                    end
+                end
+            end
+        end
+    end
+    return nearest or (level and level.name and level.name() or "the Zone")
+end
+
+-- ============================================================
+-- STASH CONTENTS  (adjust sections to match your Anomaly build)
+-- ============================================================
+
+-- Tier scales with faction reputation at the moment of rescue:
+--   rep = 0-1  → Tier 1  (basic survival supplies)
+--   rep = 2    → Tier 2  (quality medical + ammo)
+--   rep >= 3   → Tier 3  (military grade + one artifact)
+local stash_contents = {
+    [1] = { "medkit",        "bandage",   "bandage",   "antirad",  "vodka"           },
+    [2] = { "medkit_army",   "medkit",    "antirad",   "antirad",  "vodka"           },
+    [3] = { "medkit_army",   "medkit_army","antirad",  "vodka",    "af_cristall_flower" },
+}
+
+local function get_stash_tier(faction)
+    local r = get_rep(faction)
+    if r >= 3 then return 3 elseif r >= 2 then return 2 else return 1 end
+end
+
+local function spawn_stash_at(pos, lv, gv, faction)
+    if not pos or not alife then return end
+    local tier  = get_stash_tier(faction)
+    local items = stash_contents[tier] or stash_contents[1]
+
+    -- Try to spawn a backpack container first; fall back to loose ground items.
+    local bp = nil
+    pcall(function()
+        bp = alife():create("inv_backpack", pos, lv, gv)
+    end)
+
+    for _, section in ipairs(items) do
+        pcall(function()
+            if bp then
+                alife():create(section, pos, lv, gv, bp.id)
+            else
+                alife():create(section, pos, lv, gv)
+            end
+        end)
+    end
+end
+
+-- ============================================================
+-- PDA THANK-YOU MESSAGE TEMPLATES  (per faction, personality-coloured)
+-- ============================================================
+
+local thanks_templates = {
+    stalker  = {
+        "Hey %s — you pulled me out of a bad spot at %s. Left a pack nearby for you. Stay alive.",
+        "Brother, I thought I was done at %s. Check the backpack I dropped near there. You earned it, %s.",
+        "%s. I don't forget faces. Left something for you near %s. Don't mention it.",
+    },
+    dolg     = {
+        "%s. Your intervention at %s has been noted by Duty. A supply cache has been prepared. For the Order.",
+        "Duty does not forget its allies, %s. A package is waiting near %s.",
+        "Operative %s. The situation at %s was critical. Resources left on-site.",
+    },
+    freedom  = {
+        "Yo %s! You're solid! Dropped a stash near %s for you — grab it before the Zone does!",
+        "That was some wild shit at %s, %s. Stash is there waiting. Stay free!",
+        "%s! Freedom never forgets a comrade. Found you something near %s.",
+    },
+    csky     = {
+        "Clear Sky acknowledges your assistance at %s, %s. Supplies cached nearby.",
+        "%s. I left field equipment near %s. Repaying the debt in full.",
+    },
+    ecolog   = {
+        "Remarkable timing, %s. I have left some field supplies near %s as gratitude.",
+        "%s, your intervention at %s was... unexpected. A kit has been left for your use.",
+    },
+    killer   = {
+        "%s. Mercs pay their debts. Package near %s. We are square.",
+        "Don't mention this, %s. Gear is waiting near %s.",
+    },
+    army     = {
+        "Civilian %s. You assisted a military unit at %s. Official recognition: supplies left nearby.",
+        "%s. The Army acknowledges the assist. Cache is near %s — take it.",
+    },
+    bandit   = {
+        "Oi %s! You are weird for helping a Bandit, but cheers. Stash near %s is yours.",
+        "%s... okay, fine. Left some stuff near %s. Don't tell anyone, I have a reputation.",
+    },
+    monolith = {
+        "%s... The Zone guided your hands at %s. Something waits for you there.",
+        "We remember, %s. Near %s. Look.",
+    },
+}
+
+local thanks_default = {
+    "%s — thanks for what you did near %s. Stash is waiting.",
+    "Hey %s. You saved me at %s. Check nearby for a package I left.",
+    "%s. Left supplies near %s. You earned them, stalker.",
+}
+
+local function gen_thanks(faction, player_name, location)
+    local pool = thanks_templates[faction] or thanks_default
+    local tpl  = pool[math.random(#pool)]
+    -- Template may contain 0, 1 or 2 %s — use pcall to handle all cases cleanly
+    local ok1, r1 = pcall(string.format, tpl, player_name, location)
+    if ok1 then return r1 end
+    local ok2, r2 = pcall(string.format, tpl, player_name)
+    if ok2 then return r2 end
+    return "You saved me, stalker. I left something for you nearby."
+end
+
+-- ============================================================
+-- NPC DANGER TRACKER
+-- ============================================================
+
+-- Maps npc_id → { time, pos (vector copy), lv, gv, faction, name, icon }
+-- Refreshed every actor_on_update frame for NPCs within 2×RESCUE_RADIUS.
+local npcs_in_danger  = {}
+
+-- Maps npc_id → time_global: prevents double-processing within THANK_COOLDOWN window
+local recently_thanked = {}
+
+local function copy_vec(v)
+    return vector():set(v.x, v.y, v.z)
+end
+
+local function update_danger_tracker()
+    if not db.actor then return end
+    local tg = time_global()
+    local ap = db.actor:position()
+
+    for id, _ in pairs(db.storage) do
+        if id ~= AC_ID then
+            local obj = level.object_by_id(id)
+            if obj and IsStalker(obj) and obj:alive() then
+                local dist = ap:distance_to(obj:position())
+                if dist < RESCUE_RADIUS * 2 then
+                    local has_enemy = (obj:best_enemy() ~= nil)
+                    local hp = obj.health  -- 0.0–1.0 property in Anomaly
+                    if has_enemy and hp < DANGER_HP_RATIO then
+                        if not npcs_in_danger[id] then
+                            npcs_in_danger[id] = {
+                                time    = tg,
+                                pos     = copy_vec(obj:position()),
+                                lv      = obj:level_vertex_id(),
+                                gv      = obj:game_vertex_id(),
+                                faction = obj:character_community() or "stalker",
+                                name    = obj:character_name()      or "Unknown Stalker",
+                                icon    = obj:character_icon()      or "ui_iconsTotal_grouping",
+                            }
+                        else
+                            -- Refresh timestamp and position while still in danger
+                            npcs_in_danger[id].time = tg
+                            npcs_in_danger[id].pos  = copy_vec(obj:position())
+                        end
+                    else
+                        -- NPC is safe now (enemy killed by someone else, or healed, or fled)
+                        npcs_in_danger[id] = nil
+                    end
+                end
+            end
+        end
+    end
+
+    -- Purge stale entries (NPC went offline / dead without a clean transition)
+    for id, entry in pairs(npcs_in_danger) do
+        if tg > entry.time + DANGER_ENTRY_TIMEOUT then
+            npcs_in_danger[id] = nil
+        end
+    end
+
+    -- Purge old recently_thanked records
+    for id, t in pairs(recently_thanked) do
+        if tg > t + THANK_COOLDOWN * 2 then
+            recently_thanked[id] = nil
+        end
+    end
+end
+
+-- ============================================================
+-- RESCUE PROCESSING
+-- ============================================================
+
+local function do_rescue(npc_id, entry)
+    if not IIsHost() then return end
+    if not db.actor    then return end
+
+    local tg = time_global()
+
+    -- Deduplication guard
+    if recently_thanked[npc_id] and tg < recently_thanked[npc_id] + THANK_COOLDOWN then
+        return
+    end
+    recently_thanked[npc_id] = tg
+
+    -- Snapshot everything needed for the async closures NOW (NPC may go offline)
+    local faction      = entry.faction
+    local npc_name     = entry.name
+    local npc_icon     = entry.icon
+    local rescue_pos   = entry.pos          -- already a copy_vec
+    local rescue_lv    = entry.lv
+    local rescue_gv    = entry.gv
+    local player_name  = db.actor:character_name() or "Stalker"
+    local location     = get_location_near(rescue_pos)
+    local faction_disp = FACTION_DISPLAY[faction] or faction
+
+    -- Mark the NPC's memory as "rescued, pending thank" (memory = 1)
+    local npc_live = level.object_by_id(npc_id)
+    if npc_live and npc_live:alive() then
+        save_var(npc_live, "stogether_memory", 1)
+    end
+
+    -- Increase faction reputation
+    change_rep(faction, 1)
+
+    -- Build PDA sender object
+    local msg    = gen_thanks(faction, player_name, location)
+    local sender = {
+        caption = npc_name .. " (" .. faction_disp .. ")",
+        texture = npc_icon,
+    }
+
+    -- ── Delayed PDA thank-you message ────────────────────────────────────────
+    local delay    = math.random(THANK_DELAY_MIN, THANK_DELAY_MAX)
+    local ev_thank = "stog_thanks_" .. npc_id .. "_" .. tg
+    CreateTimeEvent(0, ev_thank, delay, function()
+        if db.actor then
+            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+        end
+        -- Mark NPC memory as fully acknowledged (memory = 2)
+        local npc_now = level.object_by_id(npc_id)
+        if npc_now and npc_now:alive() then
+            save_var(npc_now, "stogether_memory", 2)
+        end
+        return true
+    end)
+
+    -- ── Delayed stash spawn ───────────────────────────────────────────────────
+    local ev_stash = "stog_stash_" .. npc_id .. "_" .. tg
+    CreateTimeEvent(0, ev_stash, STASH_SPAWN_DELAY, function()
+        -- Prefer the NPC's live position; fall back to snapshot
+        local sp  = rescue_pos
+        local slv = rescue_lv
+        local sgv = rescue_gv
+        local npc_now2 = level.object_by_id(npc_id)
+        if npc_now2 and npc_now2:alive() then
+            sp  = copy_vec(npc_now2:position())
+            slv = npc_now2:level_vertex_id()
+            sgv = npc_now2:game_vertex_id()
+        end
+        -- Randomise position slightly so the stash is "hidden" nearby
+        local stash_pos = vector():set(
+            sp.x + math.random(-6, 6),
+            sp.y,
+            sp.z + math.random(-6, 6)
+        )
+        spawn_stash_at(stash_pos, slv, sgv, faction)
+        return true
+    end)
+end
+
+-- Called from death callbacks; checks if the kill position rescues any tracked NPC
+local function check_rescue_near(kill_pos)
+    if not kill_pos then return end
+    for id, entry in pairs(npcs_in_danger) do
+        if kill_pos:distance_to(entry.pos) < RESCUE_RADIUS then
+            npcs_in_danger[id] = nil   -- no longer in danger
+            do_rescue(id, entry)
+        end
+    end
+end
+
+-- ============================================================
+-- DEFERRED THANK-YOU  (NPC came back online before thanks fired)
+-- ============================================================
+
+-- Fired via npc_on_net_spawn when memory == 1 (rescued, timer never completed)
+local function deferred_rescue(npc, npc_id)
+    if not IIsHost() then return end
+    if not db.actor    then return end
+
+    local tg = time_global()
+    if recently_thanked[npc_id] and tg < recently_thanked[npc_id] + THANK_COOLDOWN then
+        return
+    end
+    recently_thanked[npc_id] = tg
+
+    local faction      = npc:character_community() or "stalker"
+    local npc_name     = npc:character_name()      or "Unknown Stalker"
+    local npc_icon     = npc:character_icon()      or "ui_iconsTotal_grouping"
+    local pos_snap     = copy_vec(npc:position())
+    local lv           = npc:level_vertex_id()
+    local gv           = npc:game_vertex_id()
+    local player_name  = db.actor:character_name() or "Stalker"
+    local location     = get_location_near(pos_snap)
+    local faction_disp = FACTION_DISPLAY[faction] or faction
+
+    local msg    = gen_thanks(faction, player_name, location)
+    local sender = {
+        caption = npc_name .. " (" .. faction_disp .. ")",
+        texture = npc_icon,
+    }
+
+    local delay = math.random(THANK_DELAY_MIN, THANK_DELAY_MAX)
+    CreateTimeEvent(0, "stog_def_thank_" .. npc_id .. "_" .. tg, delay, function()
+        if db.actor then
+            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+        end
+        local npc_now = level.object_by_id(npc_id)
+        if npc_now and npc_now:alive() then
+            save_var(npc_now, "stogether_memory", 2)
+        end
+        return true
+    end)
+
+    -- Stash was never spawned either – spawn it now
+    CreateTimeEvent(0, "stog_def_stash_" .. npc_id .. "_" .. tg, STASH_SPAWN_DELAY, function()
+        local stash_pos = vector():set(
+            pos_snap.x + math.random(-6, 6),
+            pos_snap.y,
+            pos_snap.z + math.random(-6, 6)
+        )
+        spawn_stash_at(stash_pos, lv, gv, faction)
+        return true
+    end)
+end
+
+-- ============================================================
+-- SCRIPT CALLBACKS
+-- ============================================================
+
+local function on_actor_update_mem()
+    if not IIsHost() then return end
+    update_danger_tracker()
+end
+
+local function npc_on_death_mem(victim, killer)
+    if not IIsHost() then return end
+    if not victim or not killer then return end
+    if killer:id() ~= AC_ID   then return end   -- only actor kills trigger rescues
+    check_rescue_near(victim:position())
+end
+
+local function monster_on_death_mem(victim, killer)
+    if not IIsHost() then return end
+    if not victim or not killer then return end
+    if killer:id() ~= AC_ID   then return end
+    check_rescue_near(victim:position())
+end
+
+local function npc_on_net_spawn_mem(npc)
+    if not IIsHost()          then return end
+    if not npc                then return end
+    if not IsStalker(npc)     then return end
+    if not db.actor           then return end
+    -- Check for unprocessed rescue (memory = 1 → was rescued but never thanked)
+    local mem = load_var(npc, "stogether_memory")
+    if mem == 1 then
+        deferred_rescue(npc, npc:id())
+    end
+end
+
+-- ============================================================
+-- MODULE INIT
+-- ============================================================
+
+function on_game_start()
+    if _G.M_NPC_MEMORY_REGISTERED then return end
+    _G.M_NPC_MEMORY_REGISTERED = true
+
+    RegisterScriptCallback("actor_on_update",           on_actor_update_mem)
+    RegisterScriptCallback("npc_on_death_callback",     npc_on_death_mem)
+    RegisterScriptCallback("monster_on_death_callback", monster_on_death_mem)
+    RegisterScriptCallback("npc_on_net_spawn",          npc_on_net_spawn_mem)
+    RegisterScriptCallback("actor_on_save",             actor_on_save)
+    RegisterScriptCallback("actor_on_load",             actor_on_load)
+end

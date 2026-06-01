@@ -1178,4 +1178,7 @@ function on_game_start()
     RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
     RegisterScriptCallback("monster_on_death_callback", monster_on_death_callback)
     RegisterScriptCallback("actor_on_update", on_actor_update)
+    
+    -- Initialize NPC Memory & Reputation module (rescue detection, faction rep, secret stashes)
+    M_NPC_Memory_STOGETHER.on_game_start()
 end
