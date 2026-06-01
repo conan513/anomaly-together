@@ -1,0 +1,1181 @@
+--[[
+[================]
+Description: A-Life enhancements: NPC Personalities, Goals, and Dynamic PDA News Feed.
+Written for Anomaly Together multiplayer.
+Centralized message queue implemented to prevent message flooding and overlaps.
+De-duplication system to prevent identical messages from firing simultaneously.
+Intelligent smart terrain name parser to convert raw names (e.g., pri_a28_arch) into readable locations.
+Dynamic NPC reaction to combat reports (Scavengers loot, Aggressors/Enforcers fight, Cowards flee).
+Dynamic typing delay simulator for high-fidelity immersion.
+Procedural sentence builder for infinite variation and complete immersion.
+[================]
+--]]
+
+local personalities = {"Scavenger", "Aggressor", "Survivor", "Coward", "Enforcer", "Merchant"}
+local goals = {"ArtifactHunter", "MutantSlayer", "BountyHunter"}
+
+local level_names = {
+    l01_escape = "Cordon",
+    l02_garbage = "Garbage",
+    l03_agroprom = "Agroprom",
+    l04_darkvalley = "Dark Valley",
+    l05_bar = "Rostok",
+    l06_yantar = "Yantar",
+    l07_military = "Army Warehouses",
+    l08_desert = "Desert",
+    l09_deadcity = "Dead City",
+    l10_limansk = "Limansk",
+    l10_radar = "Radar",
+    l11_hospital = "Hospital",
+    l11_pripyat = "Pripyat",
+    l12_stancia = "Chernobyl NPP",
+    l12_stancia_2 = "Chernobyl NPP",
+    l13_generators = "Generators",
+    jupiter = "Jupiter",
+    zaton = "Zaton",
+    k00_marsh = "Great Swamps",
+    k01_darkscape = "Darkscape",
+    k02_truck_cemetery = "Truck Cemetery",
+    red_forest = "Red Forest",
+    pripyat = "Outskirts",
+    underground = "Underground Labs",
+    labx8 = "Lab X-8",
+    l03u_agr_underground = "Agroprom Underground",
+    l04u_labx18 = "Lab X-18",
+    l08u_brainlab = "X-16 Lab",
+    l10u_bunker = "Brain Scorcher Bunker",
+    l12u_sarcofag = "Sarcophagus",
+    l12u_control_monolith = "Monolith Control Room",
+    l13u_warlab = "Warlab"
+}
+
+local smart_prefixes = {
+    esc = "Cordon",
+    gar = "Garbage",
+    agr = "Agroprom",
+    val = "Dark Valley",
+    bar = "Rostok",
+    yan = "Yantar",
+    mil = "Army Warehouses",
+    rad = "Radar",
+    lim = "Limansk",
+    pri = "Pripyat",
+    cit = "Dead City",
+    red = "Red Forest",
+    jup = "Jupiter",
+    zat = "Zaton",
+    mar = "Great Swamps",
+    ds = "Darkscape",
+    trc = "Truck Cemetery"
+}
+
+local function get_readable_level_name()
+    local name = level.name()
+    return level_names[name] or name or "the Zone"
+end
+
+local function clean_raw_smart_name(raw_name)
+    if not raw_name then return "a sector" end
+    
+    -- Check prefix (first 3-4 chars before underscore)
+    local prefix = string.match(raw_name, "^([%a%d]+)_")
+    local rest = string.gsub(raw_name, "^[%a%d]+_", "")
+    
+    -- Clean up the rest of the raw string
+    rest = string.gsub(rest, "smart_terrain_", "")
+    rest = string.gsub(rest, "_", " ")
+    rest = string.gsub(rest, "%d", "") -- remove numbers
+    rest = string.gsub(rest, "%s+", " ") -- collapse multiple spaces
+    rest = rest:match("^%s*(.-)%s*$") or rest -- trim
+    
+    -- Capitalize words
+    local words = {}
+    for word in string.gmatch(rest, "%S+") do
+        local capitalized = word:gsub("^%l", string.upper)
+        table.insert(words, capitalized)
+    end
+    local clean_rest = table.concat(words, " ")
+    
+    if clean_rest == "" or clean_rest == "Smart" or clean_rest == "Terrain" then
+        clean_rest = "Sector"
+    end
+    
+    local level_fullname = prefix and smart_prefixes[prefix] or get_readable_level_name()
+    return clean_rest .. " in " .. level_fullname
+end
+
+local function get_nearest_location_name(npc)
+    if not npc then return get_readable_level_name() end
+    local pos = npc:position()
+    local nearest_name = nil
+    local min_dist = 999999
+    
+    for id, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local dist = pos:distance_to(smart.position)
+            if dist < min_dist then
+                min_dist = dist
+                local raw_name = smart:name()
+                if raw_name and raw_name ~= "" then
+                    local trans = game.translate_string(raw_name)
+                    if trans and trans ~= raw_name and trans ~= "" and not string.find(trans, "smart_terrain") then
+                        nearest_name = trans
+                    else
+                        nearest_name = clean_raw_smart_name(raw_name)
+                    end
+                end
+            end
+        end
+    end
+    
+    if nearest_name then
+        return nearest_name
+    end
+    
+    return get_readable_level_name()
+end
+
+local function get_community_name(npc)
+    local comm = npc:character_community()
+    if comm == "stalker" then return "Loner"
+    elseif comm == "dolg" then return "Duty"
+    elseif comm == "freedom" then return "Freedom"
+    elseif comm == "csky" then return "Clear Sky"
+    elseif comm == "ecolog" then return "Ecologist"
+    elseif comm == "killer" then return "Mercenary"
+    elseif comm == "army" then return "Military"
+    elseif comm == "bandit" then return "Bandit"
+    elseif comm == "monolith" then return "Monolith"
+    else return comm:gsub("^%l", string.upper)
+    end
+end
+
+-- NPC initialization for personalities/goals
+local function init_npc(npc)
+    if not npc or not IsStalker(npc) then return end
+    if not npc:alive() then return end
+    
+    local npc_id = npc:id()
+    if npc_id == AC_ID then return end
+    
+    local personality = load_var(npc, "alife_personality")
+    local goal = load_var(npc, "alife_goal")
+    
+    if not personality then
+        personality = personalities[math.random(#personalities)]
+        save_var(npc, "alife_personality", personality)
+    end
+    if not goal then
+        goal = goals[math.random(#goals)]
+        save_var(npc, "alife_goal", goal)
+    end
+end
+
+-- Procedural Sentence Helpers
+local function pick_random(tbl)
+    return tbl[math.random(#tbl)]
+end
+
+local function generate_mutant_kill_msg(personality, location)
+    local templates = {
+        Scavenger = {
+            parts = {
+                {"Just harvested a mutant", "Managed to put down a beast", "Got a clean shot on a monster", "Killed a predator"},
+                {"near %s", "around the sector of %s", "just outside %s"},
+                {". Time to see if the traders will buy these parts.", ". Hopefully the skin is worth some rubles.", ". A bit of quick salvage.", ". Rubles are rubles, right?"}
+            }
+        },
+        Aggressor = {
+            parts = {
+                {"Hah! Dropped a beast", "That monster didn't stand a chance", "Easy target down", "Blew a mutant to pieces"},
+                {"near %s", "right beside %s", "around the ruins of %s", "in the sector of %s"},
+                {". My rifle does all the talking!", ". Line up the next one!", ". Who is the apex predator now?", ". Easiest hunt ever."}
+            }
+        },
+        Survivor = {
+            parts = {
+                {"Barely survived a mutant attack", "That beast almost tore me apart", "Had a very close call with a monster", "Fought off a wild predator"},
+                {"near %s", "just outside %s", "around the area of %s"},
+                {". Watch out, they are aggressive today.", ". My armor took a beating.", ". I barely got away in one piece.", ". Keep your guns loaded if you walk here."}
+            }
+        },
+        Coward = {
+            parts = {
+                {"Oh god, a mutant jumped me", "Almost became mutant food", "A beast almost got me", "A monster tried to eat me"},
+                {"near %s", "outside %s", "around %s"},
+                {". I shot it but my hands are shaking.", ". I'm locking myself in a safe spot.", ". Getting out of here right now."}
+            }
+        },
+        Enforcer = {
+            parts = {
+                {"Mutant threat neutralized", "Secured the sector from a predator", "Dangerous beast eliminated"},
+                {"near %s", "around the perimeter of %s", "in the vicinity of %s"},
+                {". Sector is now clear.", ". Area is safe for travelers.", ". Patrol routes are secure."}
+            }
+        },
+        Merchant = {
+            parts = {
+                {"Secured a mutant kill", "Harvested a high-quality beast", "Got some fresh mutant parts"},
+                {"near %s", "around the sector of %s", "close to %s"},
+                {". Fresh skins and parts for sale. PM me.", ". Premium trophies ready. Meet me at the local trading hub.", ". Good quality items ready for barter."}
+            }
+        }
+    }
+    
+    local data = templates[personality] or templates.Survivor
+    local p1 = pick_random(data.parts[1])
+    local p2 = pick_random(data.parts[2])
+    local p3 = pick_random(data.parts[3])
+    
+    return p1 .. " " .. string.format(p2, location) .. p3
+end
+
+local function generate_npc_kill_msg(personality, faction, location)
+    local templates = {
+        Scavenger = {
+            parts = {
+                {"Took down a hostile", "Neutralized an enemy combatant", "Got a clean shot on a target"},
+                {"near %s", "around %s", "just outside %s"},
+                {". Time to scavenge their gear.", ". Let's see what loot they had on them.", ". Hopefully they carried some good salvage."}
+            }
+        },
+        Aggressor = {
+            parts = {
+                {"Took down a %s!", "Smashed a hostile %s!", "Another %s eliminated!"},
+                {"They thought they could hide near %s!", "Caught them off guard near %s!", "Right in the open near %s!"},
+                {" Good riddance.", " Easiest kill of my life.", " Who's next?", " Don't mess with me."}
+            }
+        },
+        Survivor = {
+            parts = {
+                {"Had to defend myself against a %s", "Fought off a hostile %s patrol", "Got ambushed by a %s"},
+                {"near %s", "around the sector of %s", "just outside %s"},
+                {". Faction wars are getting out of hand.", ". Keep your eyes sharp out there.", ". Highly dangerous area.", ". Glad to still be breathing."}
+            }
+        },
+        Coward = {
+            parts = {
+                {"A %s tried to ambush me", "Got shot at by a hostile %s", "A %s opened fire on me"},
+                {"near %s", "outside %s", "around %s"},
+                {". I managed to drop him but I'm backing off!", ". Almost got killed! Fleeing the sector!", ". Guns firing everywhere! Staying in cover!"}
+            }
+        },
+        Enforcer = {
+            parts = {
+                {"Hostile %s eliminated", "Target neutralized", "Faction threat eliminated"},
+                {"near %s", "around the perimeter of %s", "during patrol near %s"},
+                {". Law and order will be maintained.", ". Sector security levels restored.", ". Sector is clear."}
+            }
+        },
+        Merchant = {
+            parts = {
+                {"Neutralized a hostile %s", "Defended my cargo from a %s"},
+                {"near %s", "around %s", "close to %s"},
+                {". Found some decent gear on him, ready for trading.", ". PM me if you want to buy some recycled faction supplies.", ". Clean combat, good loot."}
+            }
+        }
+    }
+    
+    local data = templates[personality] or templates.Survivor
+    local p1 = pick_random(data.parts[1])
+    local p2 = pick_random(data.parts[2])
+    local p3 = pick_random(data.parts[3])
+    
+    local f1
+    if string.find(p1, "%%s") then
+        f1 = string.format(p1, faction)
+    else
+        f1 = p1
+    end
+    
+    local f2 = string.format(p2, location)
+    if string.find(f2, "%%s") then
+        f2 = string.format(f2, faction)
+    end
+    
+    return f1 .. " " .. f2 .. p3
+end
+
+local function generate_reaction_msg(personality, smart_name)
+    local templates = {
+        Scavenger = {
+            parts = {
+                {"Copy that.", "Understood.", "Heard you loud and clear.", "Oh, nice."},
+                {"Heading to %s to see if there is any gear or loot left behind.", "Moving to %s to pick the battlefield clean.", "Heading towards %s for salvage.", "On my way to %s to grab some fresh loot."},
+                {" Keep the bodies warm.", " Hope they had good stuff.", " Don't loot everything before I arrive."}
+            }
+        },
+        Aggressor = {
+            parts = {
+                {"Sounds like a firefight near %s!", "Combat reported near %s?", "Gunfire near %s!"},
+                {"I'm heading there now to clean up the rest!", "Heading over to join the fun!", "Time to get in on the action!"},
+                {" Get ready!", " Leave some targets for me!", " I'm coming hot!"}
+            }
+        },
+        Coward = {
+            parts = {
+                {"No way, a fight near %s?", "Gunfire near %s?", "Mutants near %s?"},
+                {"I'm packing my gear and fleeing!", "Staying inside the safehouse.", "Staying far away from that place."},
+                {" Screw this.", " Not paid enough for this.", " I value my skin."}
+            }
+        },
+        Enforcer = {
+            parts = {
+                {"Understood.", "Tactical report received.", "Dispatching unit."},
+                {"Moving squad to %s to secure the sector.", "Patrol unit heading to %s to eliminate hostiles.", "Securing the perimeter of %s."},
+                {" Stand down.", " Maintain channel discipline.", " Citizens, stay in cover."}
+            }
+        },
+        Merchant = {
+            parts = {
+                {"Lots of action near %s.", "A lot of bodies near %s..."},
+                {"If anyone survived and needs medical kits or ammo, I've got supplies.", "If you harvested those mutant parts near %s, bring them to me.", "I'm trading near the local hub if you need to restock."},
+                {" Rubles ready.", " Fair prices guaranteed.", " Good hunting."}
+            }
+        },
+        Survivor = {
+            parts = {
+                {"Understood.", "Copy that.", "Roger."},
+                {"Glad to hear that threat is dead near %s.", "Another day, another fight near %s.", "Staying alert near %s."},
+                {" Safe hunting.", " Keep your heads down.", " Watch your backs."}
+            }
+        }
+    }
+    
+    local data = templates[personality] or templates.Survivor
+    local p1 = pick_random(data.parts[1])
+    local p2 = pick_random(data.parts[2])
+    local p3 = pick_random(data.parts[3])
+    
+    local f1, f2
+    if string.find(p1, "%%s") then
+        f1 = string.format(p1, smart_name)
+        f2 = p2
+    else
+        f1 = p1
+        f2 = string.format(p2, smart_name)
+    end
+    
+    return f1 .. " " .. f2 .. p3
+end
+
+local ambient_messages = {
+    Scavenger = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Just checked the anomaly fields around %s.", 
+                    "Heard rumors of a rare artifact spawning near %s.", 
+                    "Scanned the anomalous sectors of %s.",
+                    "Found some faint anomalous readings around %s.",
+                    "Artifact detector was going crazy near %s."
+                },
+                {
+                    "Too dangerous for my taste today, but there's definitely artifacts.", 
+                    "Anyone wants to team up to scavenge them?", 
+                    "Rubles are waiting to be picked up.",
+                    "Gonna wait for the radiation levels to drop before going in.",
+                    "Some good salvage must be hidden in those anomalies."
+                },
+                {
+                    " Watch out for anomalies.", 
+                    " Don't get fried.",
+                    " Keep your bolts ready.",
+                    " Good hunting, stalkers."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "Found some mutant tracks near %s.", 
+                    "Selling some mutant skins near %s.", 
+                    "Wild beast pack spotted near %s.",
+                    "Spotted a pack of mutated creatures moving around %s.",
+                    "Just heard some loud mutant growling near %s."
+                },
+                {
+                    "They are heading north.", 
+                    "Good quality skins for trade.", 
+                    "Be careful, they are hunting in packs.",
+                    "Not going anywhere near that pack without a shotgun.",
+                    "Traders will pay a premium for fresh hides."
+                },
+                {
+                    " Stalkers, be safe.", 
+                    " Keep your shotgun loaded.",
+                    " Watch your backs out there.",
+                    " Good hunting, stalkers."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "Traders are offering good rubles for bounty targets around %s.", 
+                    "Looking for contract targets around %s.",
+                    "Heard there is a heavy bounty on some stalkers near %s.",
+                    "Scanning the sector around %s for high-value targets."
+                },
+                {
+                    "Keeping my eyes open for the mark.", 
+                    "Easy money if you have the guns.",
+                    "Better watch your patches if you are hostile.",
+                    "Hope they don't see me before I spot them."
+                },
+                {
+                    " Hit me up if you want to share the split.",
+                    " Stay sharp.",
+                    " No hard feelings, just business."
+                }
+            }
+        }
+    },
+    Aggressor = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Artifact hunting is for cowards, but the rubles are good near %s.", 
+                    "If anyone tries to steal my artifact near %s,",
+                    "Scanning the anomalies near %s, and I'll kill anyone in my way.",
+                    "Spotted a shiny artifact spawning near %s."
+                },
+                {
+                    "Heading to the anomalies now.", 
+                    "they will get a bullet straight to the head.",
+                    "Time to run in, grab the loot, and gun down anyone who interferes.",
+                    "Anyone who approaches my sector is going down."
+                },
+                {
+                    " Out of my way.",
+                    " Get ready for a fight.",
+                    " Try and stop me."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "Going mutant hunting near %s.", 
+                    "Cleared a mutant nest near %s.", 
+                    "Looking for some big beasts near %s.",
+                    "Chasing down some aggressive monsters near %s.",
+                    "Time to paint the walls red with mutant blood near %s."
+                },
+                {
+                    "If any monster wants to test my new gun, come get some!", 
+                    "Zone's a bit quieter now, you're welcome.", 
+                    "Time to make some blood run.",
+                    "They think they are the hunters? I'll show them.",
+                    "Nothing beats the smell of gunpowder and dead mutants."
+                },
+                {
+                    " Bring it on!",
+                    " Who's next?",
+                    " Pure adrenaline."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "Looking for targets around %s.", 
+                    "Spotted a hostile squad moving near %s.",
+                    "Hunt is on around %s.",
+                    "Got a contract on a faction squad near %s."
+                },
+                {
+                    "If any enemy is listening: I'm coming for you.", 
+                    "Time to teach them a lesson they won't forget.",
+                    "I'll make sure they never leave that sector alive.",
+                    "Ready to collect their faction patches."
+                },
+                {
+                    " No mercy.",
+                    " Say your prayers.",
+                    " Watch your step."
+                }
+            }
+        }
+    },
+    Survivor = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Scanned the anomalies near %s.", 
+                    "Managed to pull a common artifact from the field near %s.",
+                    "Searching for some scrap near %s.",
+                    "Carefully checking the radiation levels around %s."
+                },
+                {
+                    "Be careful, the radiation levels are extremely high today.", 
+                    "Almost lost my hand to a Burner.", 
+                    "Safe routes are completely blocked.",
+                    "Had to use my last Rad-X just to get close."
+                },
+                {
+                    " Stalkers, take care.",
+                    " Safe hunting.",
+                    " May the Zone have mercy."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "Heard strange noises near %s.", 
+                    "If you are traveling near %s, make sure your gun is loaded.",
+                    "Spotted mutant activity near %s.",
+                    "Watch the bushes around %s."
+                },
+                {
+                    "Sounds like a pack of Snorks or Bloodsuckers.", 
+                    "Mutants are extremely active in this sector.", 
+                    "They are stalking travelers.",
+                    "A massive chimera or pseudogiant might be lurking there."
+                },
+                {
+                    " Stay safe, stalkers.",
+                    " Keep your eyes peeled.",
+                    " Avoid the high grass."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "Too much shooting near %s.", 
+                    "Spotted some hostile patrols near %s.",
+                    "Gunfire heard around %s.",
+                    "Factions are clashing near %s."
+                },
+                {
+                    "Faction conflicts are rising, better lay low.", 
+                    "Keep your head down and stay off the main roads.", 
+                    "Avoid the checkpoint at all costs.",
+                    "Stray bullets flying everywhere, stay in cover."
+                },
+                {
+                    " The Zone is dangerous today.",
+                    " Stay safe out there.",
+                    " Better take the long way around."
+                }
+            }
+        }
+    },
+    Coward = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Don't go to the anomalies near %s.", 
+                    "Found an artifact near %s but dropped it.",
+                    "Anomalous readings are off the charts near %s."
+                },
+                {
+                    "I saw dynamic anomalies spawning and it is a complete trap.", 
+                    "A burner almost fried my face off.", 
+                    "Too high radiation, I'm staying out.",
+                    "The gravitational anomalies will crush you instantly."
+                },
+                {
+                    " Not worth dying for.",
+                    " Run while you can.",
+                    " I'm staying far away."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "I heard howling near %s.", 
+                    "A massive pack of blind dogs is running near %s.",
+                    "Saw some terrifying shadows moving near %s."
+                },
+                {
+                    "I am locking myself in the nearest bunker.", 
+                    "Fleeing to the local trader immediately.", 
+                    "My gun jammed, almost died.",
+                    "I could hear them scratching at the walls."
+                },
+                {
+                    " Stay away from there!",
+                    " Lord help us.",
+                    " I'm hiding."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "Bounty hunting near %s?", 
+                    "Heard someone is hunting bounty targets near %s.",
+                    "Armed squads are patrolling near %s."
+                },
+                {
+                    "Forget it, the targets are way too heavily armored.", 
+                    "Complete suicide mission if you ask me.", 
+                    "They have Exo-suits, avoid them.",
+                    "They are shooting anything that moves."
+                },
+                {
+                    " Stay away.",
+                    " Not worth the risk.",
+                    " Run for cover."
+                }
+            }
+        }
+    },
+    Enforcer = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Anomaly sector near %s under patrol observation.", 
+                    "Conducting patrol sweep around anomaly fields of %s.",
+                    "Securing the anomalous perimeter near %s."
+                },
+                {
+                    "Stalkers, watch your step.", 
+                    "Reporting normal anomaly activity levels.", 
+                    "Warning: anomalous activity is highly volatile today.",
+                    "Ensure you have proper protective gear before entering."
+                },
+                {
+                    " Maintain channel discipline.",
+                    " Patrol unit out.",
+                    " Stay alert."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "Conducting mutant sweeping operation near %s.", 
+                    "Area cleaning unit active near %s.",
+                    "Neutralizing mutant threat vector near %s."
+                },
+                {
+                    "Keep radio channels clear.", 
+                    "Eliminating wild packs to secure the road.", 
+                    "Stalkers are advised to avoid the outer perimeter.",
+                    "Tactical unit is purging the nest."
+                },
+                {
+                    " Area secure.",
+                    " Order will be maintained.",
+                    " Out."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "Hostile targets reported near %s.", 
+                    "Warning: hostile squad activity detected near %s.",
+                    "Investigating hostile faction movement near %s."
+                },
+                {
+                    "Heavy patrol units are incoming to secure the sector.", 
+                    "Engaging hostile elements immediately.", 
+                    "Order will be maintained by force.",
+                    "Hostile combatants will be terminated on sight."
+                },
+                {
+                    " Maintain patrol formation.",
+                    " Dispatching backup units.",
+                    " Sector under lock."
+                }
+            }
+        }
+    },
+    Merchant = {
+        ArtifactHunter = {
+            parts = {
+                {
+                    "Buying all artifacts found near %s anomaly fields.", 
+                    "Looking for fresh artifacts harvested near %s.",
+                    "Traders paying top dollar for dynamic anomalies' yield near %s."
+                },
+                {
+                    "High prices guaranteed.", 
+                    "Paying cash immediately, no trade delays.", 
+                    "Barter supplies are fully stocked.",
+                    "Got high-grade filters and medicine ready for trade."
+                },
+                {
+                    " Meet me at the local station.",
+                    " Good business guaranteed.",
+                    " Open for barter."
+                }
+            }
+        },
+        MutantSlayer = {
+            parts = {
+                {
+                    "Need mutant parts from %s.", 
+                    "Looking to buy fresh mutant skins from %s.",
+                    "Paying premium rubles for raw mutant trophies from %s."
+                },
+                {
+                    "I have fresh medical kits and ammo for barter.", 
+                    "High quality skins will get a premium price.", 
+                    "Trade hub is open.",
+                    "Restocked shotgun ammo and bandages today."
+                },
+                {
+                    " Bring your goods.",
+                    " Quality items only.",
+                    " Safe travels."
+                }
+            }
+        },
+        BountyHunter = {
+            parts = {
+                {
+                    "If you cleared any bounties near %s, come sell their patches.", 
+                    "Buying faction patches and trophy weapons near %s.",
+                    "Trading tactical gear for bounty targets' items near %s."
+                },
+                {
+                    "I pay good rubles for hostile trophies.", 
+                    "Ready to trade recycled tactical supplies.", 
+                    "Got fresh supply crates in stock.",
+                    "Paying immediately for verified hostile dog tags."
+                },
+                {
+                    " Good hunting, stalkers.",
+                    " Rubles ready.",
+                    " Keep the trade flowing."
+                }
+            }
+        }
+    }
+}
+
+local function generate_ambient_msg(personality, goal, location, enemy_faction)
+    local data = ambient_messages[personality] or ambient_messages.Survivor
+    local goal_data = data[goal] or data.MutantSlayer
+    local p1 = pick_random(goal_data.parts[1])
+    local p2 = pick_random(goal_data.parts[2])
+    local p3 = pick_random(goal_data.parts[3])
+    
+    local f1, f2
+    if string.find(p1, "%%s") then
+        f1 = string.format(p1, location)
+        f2 = p2
+    else
+        f1 = p1
+        f2 = string.format(p2, location)
+    end
+    
+    if string.find(f1, "%%s") then f1 = string.format(f1, enemy_faction) end
+    if string.find(f2, "%%s") then f2 = string.format(f2, enemy_faction) end
+    
+    return f1 .. " " .. f2 .. p3
+end
+
+-- Centralized Message Queue with De-duplication
+local message_queue = {}
+local queue_check_cooldown = 20000 -- 20 seconds spacing between messages
+local last_queue_delivery_time = 0
+local recently_sent = {}
+local recently_sent_senders = {}
+
+-- Per-NPC report cooldown: prevents one NPC from generating multiple reports
+-- in rapid succession (e.g. killing 5 monsters in a row = 5 reports without this)
+-- Keyed by character name to survive A-Life online/offline transition ID changes.
+local npc_name_last_report = {}
+local NPC_REPORT_COOLDOWN = 90000 -- 90 seconds between reports from the same NPC
+
+-- Per-smart-terrain event cooldown: prevents a single firefight from flooding
+-- the queue with one report per casualty (e.g. squad wipe = 8 reports without this)
+local smart_last_event = {}
+local SMART_EVENT_COOLDOWN = 120000 -- 120 seconds between events from the same location
+
+local function queue_message(message, npc, smart_id)
+    local tg = time_global()
+    local npc_id = npc and npc:id()
+    local npc_name = npc and npc:character_name()
+    
+    -- HARD LIMIT: one message per NPC per queue cycle.
+    -- Also catches same-frame double-kills before the timestamp cooldown can kick in.
+    for _, item in ipairs(message_queue) do
+        if item.message == message then return end        -- identical text
+        if npc_name and item.npc_name == npc_name then return end  -- same sender already waiting
+    end
+    
+    -- Per-NPC cooldown: same NPC can only report once per NPC_REPORT_COOLDOWN ms
+    if npc_name then
+        local last_t = npc_name_last_report[npc_name]
+        if last_t and tg < last_t + NPC_REPORT_COOLDOWN then
+            return
+        end
+        npc_name_last_report[npc_name] = tg
+    end
+    
+    -- Per-smart-terrain cooldown: same location can only produce one event
+    -- per SMART_EVENT_COOLDOWN ms regardless of how many NPCs die there
+    if smart_id then
+        local last_s = smart_last_event[smart_id]
+        if last_s and tg < last_s + SMART_EVENT_COOLDOWN then
+            return
+        end
+        smart_last_event[smart_id] = tg
+    end
+    
+    -- Snapshot sender metadata NOW while the NPC object is guaranteed online.
+    local sender_meta = nil
+    if npc then
+        local comm = npc:character_community() or ""
+        local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+        local npc_name_str = npc_name or "Unknown Stalker"
+        local caption = npc_name_str
+        if comm_name ~= "" then
+            caption = caption .. " (" .. comm_name .. ")"
+        end
+        sender_meta = {
+            caption = caption,
+            texture = npc:character_icon() or "ui_iconsTotal_grouping"
+        }
+    end
+    
+    table.insert(message_queue, {
+        message = message,
+        npc_name = npc_name,
+        npc_id = npc_id,
+        smart_id = smart_id,
+        sender = sender_meta
+    })
+end
+
+-- NPC Response/Reaction logic with Typing Simulator
+local function trigger_npc_reaction(smart_id, reporter_id)
+    if not smart_id or not reporter_id then return end
+    local target_smart = alife_object(smart_id)
+    if not target_smart then return end
+    
+    local candidates = {}
+    local tg = time_global()
+    for id, st in pairs(db.storage) do
+        local obj = level.object_by_id(id)
+        if obj and IsStalker(obj) and obj:alive() and id ~= AC_ID and id ~= reporter_id then
+            if not alife():has_info(id, "npcx_is_companion") then
+                local npc_name = obj:character_name()
+                local last_t = npc_name and npc_name_last_report[npc_name]
+                if not (last_t and tg < last_t + NPC_REPORT_COOLDOWN) then
+                    local personality = load_var(obj, "alife_personality")
+                    local comm = obj:character_community()
+                    
+                    -- Initialize personality if missing
+                    if not personality then
+                        init_npc(obj)
+                        personality = load_var(obj, "alife_personality")
+                    end
+                    
+                    -- Force faction enforcers dynamically for military/duty squads
+                    if comm == "dolg" or comm == "army" or comm == "freedom" or comm == "csky" then
+                        if math.random(100) < 40 then
+                            personality = "Enforcer"
+                        end
+                    end
+                    
+                    local squad = get_object_squad(obj)
+                    if squad then
+                        table.insert(candidates, {obj = obj, squad = squad, personality = personality, name = npc_name})
+                    end
+                end
+            end
+        end
+    end
+    
+    if #candidates == 0 then return end
+    
+    -- 35% chance gate: not every event needs a reaction message.
+    -- This prevents the reaction layer from doubling every single combat report.
+    if math.random(100) > 35 then return end
+    
+    -- Pick a random responder candidate
+    local responder = candidates[math.random(#candidates)]
+    local npc = responder.obj
+    local squad = responder.squad
+    local personality = responder.personality
+    local npc_name = responder.name
+    
+    local smart_name = game.translate_string(target_smart:name())
+    if not smart_name or smart_name == "" or string.find(smart_name, "smart_terrain") then
+        smart_name = clean_raw_smart_name(target_smart:name())
+    end
+    
+    -- Procedurally build reaction message
+    local msg = generate_reaction_msg(personality, smart_name)
+    
+    -- Trigger physical pathfinding actions based on profile
+    if personality == "Scavenger" or personality == "Aggressor" or personality == "Enforcer" then
+        if xsquad and xsquad.acquire_squad then
+            xsquad.acquire_squad(squad, target_smart, true)
+        end
+    elseif personality == "Coward" then
+        local safe_smart = nil
+        local min_dist = 999999
+        for id, smart in pairs(db.smart_terrain_by_id or {}) do
+            if id ~= smart_id and smart.position then
+                local dist = npc:position():distance_to(smart.position)
+                if dist < min_dist then
+                    min_dist = dist
+                    safe_smart = smart
+                end
+            end
+        end
+        if safe_smart and xsquad and xsquad.acquire_squad then
+            xsquad.acquire_squad(squad, safe_smart, true)
+        end
+    end
+    
+    if msg then
+        -- Snapshot reactor NPC metadata before the delay fires;
+        -- the NPC object pointer may become invalid (offline) by then.
+        local comm = npc:character_community() or ""
+        local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+        local npc_name_str = npc_name or "Unknown Stalker"
+        local caption = npc_name_str
+        if comm_name ~= "" then
+            caption = caption .. " (" .. comm_name .. ")"
+        end
+        local reactor_sender = {
+            caption = caption,
+            texture = npc:character_icon() or "ui_iconsTotal_grouping"
+        }
+        local reactor_id = npc:id()
+        
+        -- Mark reactor NPC as busy so they cannot appear as a queue reporter
+        -- or fire a second reaction within the same cooldown window.
+        if npc_name then
+            npc_name_last_report[npc_name] = time_global()
+        end
+        
+        -- Calculate typing delay dynamically: 40ms per character + 2-4s thinking delay
+        local typing_speed = 0.04
+        local base_delay = math.random(2, 4)
+        local total_delay = base_delay + (#msg * typing_speed)
+        
+        CreateTimeEvent(0, "pda_news_reaction_" .. reactor_id, total_delay, function()
+            local tg_event = time_global()
+            -- Perform queue de-duplication on reaction messages as well
+            if not recently_sent[msg] then
+                if npc_name and recently_sent_senders[npc_name] and tg_event < recently_sent_senders[npc_name] + queue_check_cooldown then
+                    -- Discard reaction because this NPC spoke recently (or simultaneously in queue)
+                    return true
+                end
+                
+                recently_sent[msg] = tg_event
+                if npc_name then
+                    recently_sent_senders[npc_name] = tg_event
+                end
+                news_manager.send_tip(db.actor, msg, nil, reactor_sender, nil, nil, true)
+            end
+            return true
+        end)
+    end
+end
+
+local last_ambient_time = 0
+local ambient_cooldown = 150000 -- 150 seconds between ambient messages
+
+local function on_actor_update()
+    if not IIsHost() then return end
+    
+    local tg = time_global()
+    
+    -- Clean up old recently sent messages (older than 300 seconds / 5 minutes)
+    for msg, t in pairs(recently_sent) do
+        if tg > t + 300000 then
+            recently_sent[msg] = nil
+        end
+    end
+    
+    -- Clean up old recently sent senders (older than 20 seconds)
+    for name, t in pairs(recently_sent_senders) do
+        if tg > t + queue_check_cooldown then
+            recently_sent_senders[name] = nil
+        end
+    end
+    
+    -- Clean up per-NPC and per-smart-terrain cooldown tables
+    for name, t in pairs(npc_name_last_report) do
+        if tg > t + NPC_REPORT_COOLDOWN then
+            npc_name_last_report[name] = nil
+        end
+    end
+    for id, t in pairs(smart_last_event) do
+        if tg > t + SMART_EVENT_COOLDOWN then
+            smart_last_event[id] = nil
+        end
+    end
+    
+    -- Deliver next queued message if cooldown has passed
+    if tg > last_queue_delivery_time + queue_check_cooldown then
+        if #message_queue > 0 then
+            local item = table.remove(message_queue, 1)
+            if item then
+                -- Final de-duplication check before rendering to screen
+                if not recently_sent[item.message] then
+                    local sender_name = item.npc_name or (item.sender and item.sender.caption)
+                    if sender_name and recently_sent_senders[sender_name] and tg < recently_sent_senders[sender_name] + queue_check_cooldown then
+                        -- Skip delivery to avoid spam/duplication from same sender
+                    else
+                        last_queue_delivery_time = tg
+                        recently_sent[item.message] = tg
+                        if sender_name then
+                            recently_sent_senders[sender_name] = tg
+                        end
+                        -- Prefer the pre-snapshotted sender metadata (name/icon captured
+                        -- at queue time when the NPC was guaranteed online).
+                        -- Fall back to a live object lookup only if metadata is missing.
+                        local sender = item.sender
+                        if not sender then
+                            local npc_obj = item.npc_id and level.object_by_id(item.npc_id)
+                            sender = (npc_obj and npc_obj:alive()) and npc_obj or nil
+                        end
+                        news_manager.send_tip(db.actor, item.message, nil, sender, nil, nil, true)
+                        
+                        -- Trigger reactive NPC actions
+                        if item.smart_id and item.npc_id then
+                            trigger_npc_reaction(item.smart_id, item.npc_id)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Queue new ambient message only if the queue is empty and ambient cooldown has passed
+    if #message_queue == 0 and tg > last_ambient_time + ambient_cooldown then
+        last_ambient_time = tg
+        
+        local stalkers = {}
+        for id, st in pairs(db.storage) do
+            local obj = level.object_by_id(id)
+            if obj and IsStalker(obj) and obj:alive() and id ~= AC_ID then
+                table.insert(stalkers, obj)
+            end
+        end
+        
+        if #stalkers > 0 then
+            local npc = stalkers[math.random(#stalkers)]
+            
+            local enemy_faction = "enemies"
+            local my_comm = npc:character_community()
+            local hostile_factions = {}
+            for faction, _ in pairs({stalker=1, bandit=1, dolg=1, freedom=1, army=1, killer=1, monolith=1}) do
+                if game_relations.is_factions_enemies(my_comm, faction) then
+                    table.insert(hostile_factions, faction)
+                end
+            end
+            if #hostile_factions > 0 then
+                local target_fac = hostile_factions[math.random(#hostile_factions)]
+                if target_fac == "stalker" then enemy_faction = "Loners"
+                elseif target_fac == "dolg" then enemy_faction = "Duty members"
+                elseif target_fac == "freedom" then enemy_faction = "Freedom members"
+                elseif target_fac == "csky" then enemy_faction = "Clear Sky members"
+                elseif target_fac == "ecolog" then enemy_faction = "Ecologists"
+                elseif target_fac == "killer" then enemy_faction = "Mercenaries"
+                elseif target_fac == "army" then enemy_faction = "Military patrols"
+                elseif target_fac == "bandit" then enemy_faction = "Bandits"
+                elseif target_fac == "monolith" then enemy_faction = "Monolith members"
+                else enemy_faction = target_fac .. "s"
+                end
+            end
+            
+            local location_name = get_nearest_location_name(npc)
+            local personality = load_var(npc, "alife_personality")
+            local goal = load_var(npc, "alife_goal")
+            
+            if personality and goal then
+                local msg = generate_ambient_msg(personality, goal, location_name, enemy_faction)
+                if msg then
+                    queue_message(msg, npc, nil)
+                end
+            end
+        end
+    end
+end
+
+local function npc_on_death_callback(victim, killer)
+    if not IIsHost() then return end
+    if not victim or not killer then return end
+    
+    if IsStalker(killer) and killer:alive() and killer:id() ~= AC_ID then
+        local personality = load_var(killer, "alife_personality")
+        if not personality then
+            init_npc(killer)
+            personality = load_var(killer, "alife_personality")
+        end
+        if not personality then return end
+        
+        local faction = get_community_name(victim)
+        local nearest_smart = nil
+        local min_dist = 999999
+        for id, smart in pairs(db.smart_terrain_by_id or {}) do
+            if smart.position then
+                local dist = killer:position():distance_to(smart.position)
+                if dist < min_dist then
+                    min_dist = dist
+                    nearest_smart = smart
+                end
+            end
+        end
+        
+        local location_name = get_nearest_location_name(killer)
+        
+        -- Procedurally generate death report message
+        local message = generate_npc_kill_msg(personality, faction, location_name)
+        
+        queue_message(message, killer, nearest_smart and nearest_smart.id or nil)
+    end
+end
+
+local function monster_on_death_callback(victim, killer)
+    if not IIsHost() then return end
+    if not victim or not killer then return end
+    
+    if IsStalker(killer) and killer:alive() and killer:id() ~= AC_ID then
+        local personality = load_var(killer, "alife_personality")
+        if not personality then
+            init_npc(killer)
+            personality = load_var(killer, "alife_personality")
+        end
+        if not personality then return end
+        
+        local nearest_smart = nil
+        local min_dist = 999999
+        for id, smart in pairs(db.smart_terrain_by_id or {}) do
+            if smart.position then
+                local dist = killer:position():distance_to(smart.position)
+                if dist < min_dist then
+                    min_dist = dist
+                    nearest_smart = smart
+                end
+            end
+        end
+        
+        local location_name = get_nearest_location_name(killer)
+        
+        -- Procedurally generate mutant kill report message
+        local message = generate_mutant_kill_msg(personality, location_name)
+        
+        queue_message(message, killer, nearest_smart and nearest_smart.id or nil)
+    end
+end
+
+local function npc_on_net_spawn(npc)
+    init_npc(npc)
+end
+
+function on_game_start()
+    if _G.M_ALIFE_ENHANCEMENTS_REGISTERED then return end
+    _G.M_ALIFE_ENHANCEMENTS_REGISTERED = true
+    
+    RegisterScriptCallback("npc_on_net_spawn", npc_on_net_spawn)
+    RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
+    RegisterScriptCallback("monster_on_death_callback", monster_on_death_callback)
+    RegisterScriptCallback("actor_on_update", on_actor_update)
+end

@@ -11,120 +11,147 @@ local function NOP() end
 local function RETURN_TRUE() return true end
 local function RETURN_FALSE() return false end
 local OLDQCOSTUME = item_parts.evaluate_parts
+
+-- Helper function to apply overrides on clients but keep original logic on host
+local function patch_func(tbl, name, client_impl)
+    if not tbl or not tbl[name] then return end
+    local original = tbl[name]
+    tbl[name] = function(...)
+        if IIsHost() then
+            return original(...)
+        end
+        return client_impl(...)
+    end
+end
+
 function Patch()
     log("[Client] Patching game for some things...")
+	
+	local original_alife_create = _G.alife_create
 	_G.alife_create = function (sec, pos, lid, gid, id, state)
+		if IIsHost() then
+			return original_alife_create(sec, pos, lid, gid, id, state)
+		end
 		if id or string.match(sec, "level_changer") then
             return alife_create_local(sec, pos, lid, gid, id, state)
         end
 	end
+	
 	if alife() then
+		local orig_register = alife().register
 		alife().register = function (se)
+			if IIsHost() then
+				return orig_register(se)
+			end
 			callstack()
 			log("!NO WAY!")
 		end
+		local orig_create = alife().create
 		alife().create = function (se)
+			if IIsHost() then
+				return orig_create(se)
+			end
 			callstack()
 			log("!NO WAY!")
 		end
 	end
+	
 	item_parts.evaluate_parts = function (obj)
+		if IIsHost() then
+			return OLDQCOSTUME(obj)
+		end
 		local para = para and obj:parent()
         if not item_parts.get_parts_con(obj, obj:id(), false) and (not para or para:id() == AC_ID) then
             return OLDQCOSTUME(obj)
         end
     end
-	death_manager.create_release_item = NOP
-	death_manager.create_item = NOP
-	death_manager.try_spawn_ammo = NOP
-	death_manager.spawn_cosmetics = NOP
-	death_manager.set_weapon_drop_condition = NOP
-	death_manager.keep_item = RETURN_FALSE
-	treasure_manager.try_spawn_treasure = NOP
-	guaranteed_loot.check = NOP
-	guaranteed_loot.npc_on_use = NOP
-	guaranteed_loot.on_game_start = NOP
-	xr_logic.create_items = NOP
-	xr_logic.spawn_items = NOP
-	ui_debug_launcher.release_obj = function()
+	
+	patch_func(death_manager, "create_release_item", NOP)
+	patch_func(death_manager, "create_item", NOP)
+	patch_func(death_manager, "try_spawn_ammo", NOP)
+	patch_func(death_manager, "spawn_cosmetics", NOP)
+	patch_func(death_manager, "set_weapon_drop_condition", NOP)
+	patch_func(death_manager, "keep_item", RETURN_FALSE)
+	patch_func(treasure_manager, "try_spawn_treasure", NOP)
+	patch_func(guaranteed_loot, "check", NOP)
+	patch_func(guaranteed_loot, "npc_on_use", NOP)
+	patch_func(guaranteed_loot, "on_game_start", NOP)
+	patch_func(xr_logic, "create_items", NOP)
+	patch_func(xr_logic, "spawn_items", NOP)
+	
+	patch_func(ui_debug_launcher, "release_obj", function()
 		local o1 = level.get_target_obj()
 		if not o1 then return end
 		local name = o1:name()
 		alife_release_client_id(o1:id())
 		printf('-[%s] vanished',name)
-	end
-	function task_manager.CRandomTask:task_fail(p1)
-	end
-	game_setup.try_spawn_world_item = NOP
-	ph_door.try_to_open_door = NOP
-	ph_door.try_to_close_door = NOP
-	task_functor.smart_control_task_target_functor = NOP
-	tasks_clear_map.mutants_in_map = NOP
-	state_mgr_direction.turn = NOP
-	state_mgr_direction.look_at_object = NOP
-	xr_effects.set_weather = NOP
-	xr_effects.setup_companion_task = NOP
-	xr_effects.spawn_corpse = NOP
-	utils_obj.create_squad = NOP
-	bind_anomaly_field.save_state = function (m_data) m_data.dyn_anomalies = {} end
-	bind_anomaly_field.load_state = NOP
-	bind_anomaly_field.dyn_anomalies_refresh = NOP
-	bind_anomaly_field.dyn_anomalies_suffle = NOP
-	bind_anomaly_field.dyn_anomalies_update = NOP
-	bind_anomaly_field.dyn_anomalies_spawn = NOP
-	bind_anomaly_zone.force_spawn_artefacts = NOP
-	pda.npc_on_net_spawn = NOP
-	level.set_weather = NOP
-	dialogs.drx_sl_give_sl_task = NOP
-	smart_terrain_warfare.smart_terrain_on_update = NOP
-	sim_squad_bounty.try_spawn = NOP
-	sim_squad_bounty.try_spawn = NOP
-	sim_squad_bounty.spawn_timer = RETURN_TRUE
-	sim_squad_bounty.state_timer = RETURN_TRUE
-	sim_squad_bounty.on_game_start = NOP
-	tasks_chimera_scan.spawn_on_squad_member = NOP
-	ui_sleep_dialog.dream_callback = function()
+	end)
+	
+	patch_func(task_manager.CRandomTask, "task_fail", NOP)
+	patch_func(game_setup, "try_spawn_world_item", NOP)
+	patch_func(ph_door, "try_to_open_door", NOP)
+	patch_func(ph_door, "try_to_close_door", NOP)
+	patch_func(task_functor, "smart_control_task_target_functor", NOP)
+	patch_func(tasks_clear_map, "mutants_in_map", NOP)
+	patch_func(state_mgr_direction, "turn", NOP)
+	patch_func(state_mgr_direction, "look_at_object", NOP)
+	patch_func(xr_effects, "set_weather", NOP)
+	patch_func(xr_effects, "setup_companion_task", NOP)
+	patch_func(xr_effects, "spawn_corpse", NOP)
+	patch_func(utils_obj, "create_squad", NOP)
+	
+	patch_func(bind_anomaly_field, "save_state", function (m_data) m_data.dyn_anomalies = {} end)
+	patch_func(bind_anomaly_field, "load_state", NOP)
+	patch_func(bind_anomaly_field, "dyn_anomalies_refresh", NOP)
+	patch_func(bind_anomaly_field, "dyn_anomalies_suffle", NOP)
+	patch_func(bind_anomaly_field, "dyn_anomalies_update", NOP)
+	patch_func(bind_anomaly_field, "dyn_anomalies_spawn", NOP)
+	patch_func(bind_anomaly_zone, "force_spawn_artefacts", NOP)
+	patch_func(pda, "npc_on_net_spawn", NOP)
+	patch_func(level, "set_weather", NOP)
+	patch_func(dialogs, "drx_sl_give_sl_task", NOP)
+	patch_func(smart_terrain_warfare, "smart_terrain_on_update", NOP)
+	patch_func(sim_squad_bounty, "try_spawn", NOP)
+	patch_func(sim_squad_bounty, "spawn_timer", RETURN_TRUE)
+	patch_func(sim_squad_bounty, "state_timer", RETURN_TRUE)
+	patch_func(sim_squad_bounty, "on_game_start", NOP)
+	patch_func(tasks_chimera_scan, "spawn_on_squad_member", NOP)
+	
+	patch_func(ui_sleep_dialog, "dream_callback", function()
 		level.add_cam_effector("camera_effects\\sleep.anm", 10, false, "ui_sleep_dialog.dream_callback2")
 		db.actor.power = 1
 		disable_info("actor_is_sleeping")
 		disable_info("force_slp2")
-	end
-	alife_storage_manager.get_state().stop_respawns = true
-	function sim_board.simulation_board:create_squad(spawn_smart, sq_id)
+	end)
+	
+	patch_func(sim_board.simulation_board, "create_squad", function(self, spawn_smart, sq_id)
 		return nil
-	end
-	function sim_board.simulation_board:create_squad_at_named_location()
+	end)
+	patch_func(sim_board.simulation_board, "create_squad_at_named_location", function(self)
 		return nil
-	end
-	function sim_board.simulation_board:assign_squad_to_smart(squad, smart_id)
+	end)
+	patch_func(sim_board.simulation_board, "assign_squad_to_smart", function(self, squad, smart_id)
 		return nil
-	end
-	function smart_terrain.se_smart_terrain:try_respawn()
-		--NO RESPAWN
-	end
-	function mob_walker.mob_walker:update(delta)
-		--HOST CONTROL MOB
-	end
-	function mob_walker.mob_walker:waypoint_callback(obj, action_type, index)
-		--HOST CONTROL MOB
-	end
-	function state_mgr_animation.animation:set_state(new_state, fast_set)
-		--HOST CONTROL NPC
-	end
-	function xrs_facer.action_facer:execute()
-		--HOST CONTROL NPC
-	end
+	end)
+	patch_func(smart_terrain.se_smart_terrain, "try_respawn", NOP)
+	patch_func(mob_walker.mob_walker, "update", NOP)
+	patch_func(mob_walker.mob_walker, "waypoint_callback", NOP)
+	
+	patch_func(state_mgr_animation.animation, "set_state", NOP)
+	patch_func(xrs_facer.action_facer, "execute", NOP)
+	
 	-- COMPANION DIALOGS
-	dialogs_axr_companion.become_actor_companion = function(actor, npc)
+	patch_func(dialogs_axr_companion, "become_actor_companion", function(actor, npc)
 		local npc = dialogs.who_is_npc(actor, npc)
 		local srv_id = GameManager:GetServerIDByLocalID(npc:id())
 		GameManager:OnICustomScriptAction("dialogs_axr_companion", "become_actor_companion", "db.actor, level.object_by_id(".. tostring(srv_id) .. ")", true)
-	end
-	dialogs_axr_companion.remove_companions_from_squad = function(actor, npc)
+	end)
+	patch_func(dialogs_axr_companion, "remove_companions_from_squad", function(actor, npc)
 		local npc = dialogs.who_is_npc(actor, npc)
 		local srv_id = GameManager:GetServerIDByLocalID(npc:id())
 		GameManager:OnICustomScriptAction("dialogs_axr_companion", "remove_companions_from_squad", "db.actor, level.object_by_id(".. tostring(srv_id) .. ")", true)
-	end
+	end)
+	
 	-- COMPANION GENERIC
 	axr_companions.add_to_actor_squad = dialogs_axr_companion.become_actor_companion
 	axr_companions.remove_from_actor_squad = dialogs_axr_companion.remove_companions_from_squad
@@ -132,253 +159,121 @@ function Patch()
 	dialogs_lostzone.dismiss_speaker_companion = dialogs_axr_companion.remove_companions_from_squad
 	dialogs_lostzone.set_degtyarev_taskforce_squad_as_companion = dialogs_axr_companion.become_actor_companion
 	dialogs_agr_u.set_speaker_as_companion = dialogs_axr_companion.become_actor_companion
-	axr_companions.companion_add_waypoints = NOP
-	axr_companions.companion_remove_waypoints = NOP
-	xr_conditions.validate_spy_task = RETURN_FALSE
-	task_status_functor.spy_task_status_functor = NOP
-	utils_obj.switch_online = NOP
-	task_functor.spy_task_target_functor = function(task_id, field, p, tsk)
+	
+	patch_func(axr_companions, "companion_add_waypoints", NOP)
+	patch_func(axr_companions, "companion_remove_waypoints", NOP)
+	patch_func(xr_conditions, "validate_spy_task", RETURN_FALSE)
+	patch_func(task_status_functor, "spy_task_status_functor", NOP)
+	patch_func(utils_obj, "switch_online", NOP)
+	
+	patch_func(task_functor, "spy_task_target_functor", function(task_id, field, p, tsk)
         if not (field == "target" and tsk and db.actor) then return end
         return tsk.current_target or tsk.task_giver_id
-	end
-	function axr_beh.action_beh:set_desired_target()
-	end
-	function bind_anomaly_zone.anomaly_zone_binder:spawn_artefact_randomly()
-		--NOT WORKER
-	end
-	ui_sleep_dialog.dream_callback = function ()
-        level.add_cam_effector("camera_effects\\sleep.anm", 10, false, "ui_sleep_dialog.dream_callback2")
-		db.actor.power = 1
-    end
-	function xr_wounded.evaluator_wound:evaluate()
-		return false
-	end
-	function xr_patrol.evaluator_patrol_end:evaluate()
-		return false
-	end
-	function xr_patrol.evaluator_patrol_comm:evaluate()
-		return false
-	end
-	function xr_patrol.action_patrol:execute()
+	end)
+	
+	patch_func(axr_beh.action_beh, "set_desired_target", NOP)
+	patch_func(bind_anomaly_zone.anomaly_zone_binder, "spawn_artefact_randomly", NOP)
+	
+	patch_func(xr_wounded.evaluator_wound, "evaluate", RETURN_FALSE)
+	patch_func(xr_patrol.evaluator_patrol_end, "evaluate", RETURN_FALSE)
+	patch_func(xr_patrol.evaluator_patrol_comm, "evaluate", RETURN_FALSE)
+	patch_func(xr_patrol.action_patrol, "execute", function(self)
 		action_base.execute(self)
-	end
-	function xr_patrol.action_commander:execute()
+	end)
+	patch_func(xr_patrol.action_commander, "execute", function(self)
 		action_base.execute(self)
-	end
-	function xr_camper.action_patrol:process_danger()
-	end
-	function xr_camper.evaluator_end:evaluate()
-		return false
-	end
-	function xr_camper.evaluator_close_combat:evaluate()
-		return false
-	end
-	function xr_camper.action_patrol:execute()
+	end)
+	patch_func(xr_camper.action_patrol, "process_danger", NOP)
+	patch_func(xr_camper.evaluator_end, "evaluate", RETURN_FALSE)
+	patch_func(xr_camper.evaluator_close_combat, "evaluate", RETURN_FALSE)
+	patch_func(xr_camper.action_patrol, "execute", function(self)
 		action_base.execute(self)
-	end
-	function xr_animpoint.animpoint:update()
-	end
-	function xr_animpoint.evaluator_need_animpoint:evaluate()
-		return false
-	end
-	function xr_animpoint.evaluator_reach_animpoint:evaluate()
-		return false
-	end
-	function smart_terrain.se_smart_terrain:update()
+	end)
+	patch_func(xr_animpoint.animpoint, "update", NOP)
+	patch_func(xr_animpoint.evaluator_need_animpoint, "evaluate", RETURN_FALSE)
+	patch_func(xr_animpoint.evaluator_reach_animpoint, "evaluate", RETURN_FALSE)
+	
+	patch_func(smart_terrain.se_smart_terrain, "update", function(self)
 		if not self.disabled then
 			self.disabled = true
 		end
-	end
-	smart_terrain_warfare.check_unique_npcs = NOP
-	function sim_squad_scripted.sim_squad_scripted:update()
-	end
-	function sim_squad_scripted.sim_squad_scripted:check_online_status()
-	end
-	function sim_squad_scripted.sim_squad_scripted:remove_squad()
-    end
-	function sim_squad_scripted.sim_squad_scripted:sim_available()
-    end
-	function axr_beh.evaluator_beh:evaluate()
-		return false
-	end
-	function axr_fight_from_cover.evaluator_fight_from_cover:evaluate()
-		return false
-	end
-	function axr_npc_vs_box.evaluator_npc_vs_box:evaluate()
-		return false
-	end
-	function axr_npc_vs_heli.evaluator_npc_vs_heli:evaluate()
-		return false
-	end
-	function axr_radio_in_heli.evaluator_radio_in_heli:evaluate()
-		return false
-	end
-	function axr_stalker_panic.evaluator_stalker_panic:evaluate()
-		return false
-	end
-	function axr_turn_on_campfire.eva_turn_on_campfire:evaluate()
-		return false
-	end
-	function post_combat_idle.evaluator_combat_enemy:evaluate()
-		return false
-	end
-	function rx_ff.evaluator_dont_shoot:evaluate()
-		return false
-	end
-	function xr_abuse.evaluator_abuse:evaluate()
-		return false
-	end
-	function xr_campfire_point.evaluator_need_job:evaluate()
-		return false
-	end
-	function xr_combat_camper.evaluator_combat_camper:evaluate()
-		return false
-	end
-	function xr_combat_camper.evaluator_see:evaluate()
-		return false
-	end
-	function xr_combat_monolith.evaluator_combat_monolith:evaluate()
-		return false
-	end
-	function xr_combat_monolith.evaluator_see:evaluate()
-		return false
-	end
-	function xr_combat_monolith.evaluator_close:evaluate()
-		return false
-	end
-	function xr_combat_monolith.evaluator_on_pos:evaluate()
-		return false
-	end
-	function xr_combat_zombied.evaluator_combat_zombied:evaluate()
-		return false
-	end
-	function xr_combat.evaluator_check_combat:evaluate()
-		return false
-	end
-	function xr_combat.evaluator_enemy:evaluate()
-		return false
-	end
-	function xr_companion.evaluator_need_companion:evaluate()
-		return false
-	end
-	function xr_corpse_detection.evaluator_corpse:evaluate()
-		return false
-	end
-	function xr_cover.evaluator_need_cover:evaluate()
-		return false
-	end
-	function xr_danger.evaluator_danger:evaluate()
-		return false
-	end
-	function xr_danger.evaluator_check_danger:evaluate()
-		return false
-	end
-	function xr_gather_items.eva_gather_itm:evaluate()
-		return false
-	end
-	function xr_gather_items.evaluator_gather_items:evaluate()
-		return false
-	end
-	function xr_help_wounded.evaluator_wounded_exist:evaluate()
-		return false
-	end
-	function xr_reach_task.evaluator_reached_task_location:evaluate()
-		return false
-	end
-	function xr_remark.evaluator_need_remark:evaluate()
-		return false
-	end
-	function xr_smartcover.evaluator_use_smartcover_in_combat:evaluate()
-		return false
-	end
-	function xr_smartcover.evaluator_need_smartcover:evaluate()
-		return false
-	end
-	function xr_walker.evaluator_need_walker:evaluate()
-		return false
-	end
-	function xrs_facer.evaluator_facer:evaluate()
-		return false
-	end
-	function xrs_facer.evaluator_steal_up:evaluate()
-		return false
-	end
-	function xrs_kill_wounded.eva_kill_wounded:evaluate()
-		return false
-	end
-	function state_mgr_animation.eva_state_mgr_animation:evaluate()
-		return false
-	end
-	function state_mgr_animstate.eva_state_mgr_animstate:evaluate()
-		return false
-	end
-	function state_mgr_bodystate.eva_state_mgr_bodystate:evaluate()
-		return false
-	end
-	function state_mgr_direction.eva_state_mgr_direction:evaluate()
-		return false
-	end
-	function state_mgr_mental.eva_state_mgr_mental:evaluate()
-		return false
-	end
-	function state_mgr_movement.eva_state_mgr_movement:evaluate()
-		return false
-	end
-	function state_mgr_smartcover.eva_state_mgr_smartcover_need:evaluate()
-		return false
-	end
-	function state_mgr_weapon.eva_state_mgr_weapon:evaluate()
-		return false
-	end
-	function state_mgr.eva_state_mgr_end:evaluate()
-		return false
-	end
-	function state_mgr.eva_state_mgr_locked:evaluate()
-		return false
-	end
-	function state_mgr.evaluator_state_mgr_idle_alife:evaluate()
-		return false
-	end
-	function axr_fight_from_cover.evaluator_fight_from_cover:evaluate()
-		return false
-	end
-	function xrs_facer.evaluator_facer:evaluate()
-		return false
-	end
-	function xrs_facer.evaluator_steal_up:evaluate()
-		return false
-	end
-	utils_obj.try_to_strafe = function (npc, old_vid)
+	end)
+	
+	patch_func(smart_terrain_warfare, "check_unique_npcs", NOP)
+	patch_func(sim_squad_scripted.sim_squad_scripted, "update", NOP)
+	patch_func(sim_squad_scripted.sim_squad_scripted, "check_online_status", NOP)
+	patch_func(sim_squad_scripted.sim_squad_scripted, "remove_squad", NOP)
+	patch_func(sim_squad_scripted.sim_squad_scripted, "sim_available", NOP)
+	
+	patch_func(axr_beh.evaluator_beh, "evaluate", RETURN_FALSE)
+	patch_func(axr_fight_from_cover.evaluator_fight_from_cover, "evaluate", RETURN_FALSE)
+	patch_func(axr_npc_vs_box.evaluator_npc_vs_box, "evaluate", RETURN_FALSE)
+	patch_func(axr_npc_vs_heli.evaluator_npc_vs_heli, "evaluate", RETURN_FALSE)
+	patch_func(axr_radio_in_heli.evaluator_radio_in_heli, "evaluate", RETURN_FALSE)
+	patch_func(axr_stalker_panic.evaluator_stalker_panic, "evaluate", RETURN_FALSE)
+	patch_func(axr_turn_on_campfire.eva_turn_on_campfire, "evaluate", RETURN_FALSE)
+	patch_func(post_combat_idle.evaluator_combat_enemy, "evaluate", RETURN_FALSE)
+	patch_func(rx_ff.evaluator_dont_shoot, "evaluate", RETURN_FALSE)
+	patch_func(xr_abuse.evaluator_abuse, "evaluate", RETURN_FALSE)
+	patch_func(xr_campfire_point.evaluator_need_job, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_camper.evaluator_combat_camper, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_camper.evaluator_see, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_monolith.evaluator_combat_monolith, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_monolith.evaluator_see, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_monolith.evaluator_close, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_monolith.evaluator_on_pos, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat_zombied.evaluator_combat_zombied, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat.evaluator_check_combat, "evaluate", RETURN_FALSE)
+	patch_func(xr_combat.evaluator_enemy, "evaluate", RETURN_FALSE)
+	patch_func(xr_companion.evaluator_need_companion, "evaluate", RETURN_FALSE)
+	patch_func(xr_corpse_detection.evaluator_corpse, "evaluate", RETURN_FALSE)
+	patch_func(xr_cover.evaluator_need_cover, "evaluate", RETURN_FALSE)
+	patch_func(xr_danger.evaluator_danger, "evaluate", RETURN_FALSE)
+	patch_func(xr_danger.evaluator_check_danger, "evaluate", RETURN_FALSE)
+	patch_func(xr_gather_items.eva_gather_itm, "evaluate", RETURN_FALSE)
+	patch_func(xr_gather_items.evaluator_gather_items, "evaluate", RETURN_FALSE)
+	patch_func(xr_help_wounded.evaluator_wounded_exist, "evaluate", RETURN_FALSE)
+	patch_func(xr_reach_task.evaluator_reached_task_location, "evaluate", RETURN_FALSE)
+	patch_func(xr_remark.evaluator_need_remark, "evaluate", RETURN_FALSE)
+	patch_func(xr_smartcover.evaluator_use_smartcover_in_combat, "evaluate", RETURN_FALSE)
+	patch_func(xr_smartcover.evaluator_need_smartcover, "evaluate", RETURN_FALSE)
+	patch_func(xr_walker.evaluator_need_walker, "evaluate", RETURN_FALSE)
+	
+	patch_func(xrs_facer.evaluator_facer, "evaluate", RETURN_FALSE)
+	patch_func(xrs_facer.evaluator_steal_up, "evaluate", RETURN_FALSE)
+	patch_func(xrs_kill_wounded.eva_kill_wounded, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_animation.eva_state_mgr_animation, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_animstate.eva_state_mgr_animstate, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_bodystate.eva_state_mgr_bodystate, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_direction.eva_state_mgr_direction, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_mental.eva_state_mgr_mental, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_movement.eva_state_mgr_movement, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_smartcover.eva_state_mgr_smartcover_need, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr_weapon.eva_state_mgr_weapon, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr.eva_state_mgr_end, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr.eva_state_mgr_locked, "evaluate", RETURN_FALSE)
+	patch_func(state_mgr.evaluator_state_mgr_idle_alife, "evaluate", RETURN_FALSE)
+	
+	patch_func(utils_obj, "try_to_strafe", function (npc, old_vid)
 		return utils_obj.lmove(npc, old_vid, old_vid)
-	end
-	utils_obj.try_go_aside_object = function (npc, old_vid)
+	end)
+	patch_func(utils_obj, "try_go_aside_object", function (npc, old_vid)
 		return utils_obj.lmove(npc, old_vid, old_vid)
-	end
-	utils_obj.try_go_backward = function (npc, old_vid)
+	end)
+	patch_func(utils_obj, "try_go_backward", function (npc, old_vid)
 		return utils_obj.lmove(npc, old_vid, old_vid)
-	end
-	function state_mgr.state_manager:update()
-	end
-	function state_mgr.state_manager:update()
-	end
-	function move_mgr.move_mgr:update()
-	end
-	function move_mgr.move_mgr:initialize(npc)
+	end)
+	
+	patch_func(state_mgr.state_manager, "update", NOP)
+	patch_func(move_mgr.move_mgr, "update", NOP)
+	patch_func(move_mgr.move_mgr, "initialize", function(self, npc)
 		self.__disable = true
-	end
-	function state_mgr_animation.animation:update_anim()
-	end
-	function state_mgr_animation.animation:set_state()
-	end
-	function dynamic_news_manager.DynamicNewsManager:TickRandom()
-		return true
-	end
-	function dynamic_news_manager.DynamicNewsManager:WelcomeToNetwork()
-	end
-	function release_body_manager.Crelease_body:clear(all,dist)
-		-- HOST MUST DESPAWN
-	end
-	xr_combat_ignore.is_enemy = function ()
-		return false -- CLIENT
-	end
+	end)
+	patch_func(state_mgr_animation.animation, "update_anim", NOP)
+	patch_func(state_mgr_animation.animation, "set_state", NOP)
+	patch_func(dynamic_news_manager.DynamicNewsManager, "TickRandom", RETURN_TRUE)
+	patch_func(dynamic_news_manager.DynamicNewsManager, "WelcomeToNetwork", NOP)
+	patch_func(release_body_manager.Crelease_body, "clear", NOP)
+	
+	patch_func(xr_combat_ignore, "is_enemy", RETURN_FALSE)
 end

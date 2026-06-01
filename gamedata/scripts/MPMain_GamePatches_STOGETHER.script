@@ -1749,14 +1749,54 @@ function Patch()
         end
         OLDSENDTIP(db.actor, data[1], data[2], data[3], data[4], data[5])
     end
+    news_manager.send_tip_client_new = function(data)
+        if not db.actor then return end
+        local text = game.translate_string(data.text)
+        xr_sound.set_sound_play(AC_ID, "pda_tips")
+        db.actor:give_game_news(data.caption, text, data.texture, (data.timeout or 0) * 1000, data.showtime or 5000, 0)
+    end
     news_manager.send_tip = function(actor, news_id, timeout, sender, showtime, sender_id, IsGlobal)
         if not actor then return end
-        OLDSENDTIP(actor, news_id, timeout, sender, showtime, sender_id)
-        if IsGlobal then
-            if type(sender) == "userdata" and sender.id then
-                sender = GameManager:GetServerIDByLocalID(sender:id())
+        
+        local texture = "ui_iconsTotal_grouping"
+        local caption = game.translate_string("st_tip")
+        
+        if sender ~= nil then
+            if type(sender) == "string" then
+                if news_manager.tips_icons and news_manager.tips_icons[sender] then
+                    texture = news_manager.tips_icons[sender]
+                end
+                caption = game.translate_string(sender)
+            elseif type(sender) == "userdata" and sender.clsid then
+                texture = sender:character_icon()
+                local comm = sender:character_community()
+                local comm_name = comm and game.translate_string(comm) or ""
+                caption = sender:character_name()
+                if comm_name ~= "" then
+                    caption = caption .. " (" .. comm_name .. ")"
+                end
+            elseif type(sender) == "table" then
+                texture = sender.texture or texture
+                caption = sender.caption or caption
             end
-            GameManager:OnICustomScriptAction("news_manager", "send_tip_client", serialize_table_simple({ news_id, timeout, sender, showtime, sender_id }), false)
+        end
+        
+        local text = game.translate_string(news_id)
+        timeout = timeout or 0
+        showtime = showtime or 5000
+        
+        xr_sound.set_sound_play(AC_ID, "pda_tips")
+        actor:give_game_news(caption, text, texture, timeout * 1000, showtime, 0)
+        
+        if IsGlobal then
+            local sync_data = {
+                text = news_id,
+                timeout = timeout,
+                showtime = showtime,
+                caption = caption,
+                texture = texture
+            }
+            GameManager:OnICustomScriptAction("news_manager", "send_tip_client_new", serialize_table_simple(sync_data), false)
         end
     end
     dynamic_news_helper.send_tip_client = function(data)

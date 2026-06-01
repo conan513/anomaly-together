@@ -17,6 +17,14 @@ local function on_game_load()
     if MPMain_STOGETHER and MPMain_STOGETHER.RestoreValues then
         MPMain_STOGETHER.RestoreValues()
     end
+    if not IIsHost() then
+        if alife_storage_manager and alife_storage_manager.get_state then
+            local state = alife_storage_manager.get_state()
+            if state then
+                state.stop_respawns = true
+            end
+        end
+    end
 end
 local function actor_on_first_update()
     MPMain_STOGETHER.GameLoaded = true
@@ -77,6 +85,7 @@ function on_game_start()
     else
         MPMain_Server_STOGETHER.Patch()
     end
+    -- Hook A-Life Enhancements (Automatically loaded by engine axr_main)
     -- REGISTER CALLBACKS
     RegisterScriptCallback("actor_on_first_update", actor_on_first_update)
     RegisterScriptCallback("on_game_load", on_game_load)
