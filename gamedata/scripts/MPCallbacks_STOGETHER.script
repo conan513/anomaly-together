@@ -41,7 +41,23 @@ local function on_key_press(key)
     end
 end
 local function actor_on_item_take(item)
+    if not item then return end
     GameManager:OnICustomAnimation("werasik2aa_pickup", item:section(), true, 1)
+
+    if item:section() == "money_paper" then
+        if IIsHost() then
+            local val = se_load_var(item:id(), nil, "money_value") or 0
+            if val <= 0 then
+                val = math.random(150, 450)
+            end
+            db.actor:give_money(val)
+            news_manager.relocate_money(db.actor, "in", val)
+            alife_release(alife_object(item:id()), "consumed money paper")
+        else
+            local cmd = string.format("remote_request_money_value(%d, %d)", item:id(), GameManager:GetMySNETID())
+            GameManager:OnICustomScriptAction(cmd, true)
+        end
+    end
 end
 local function actor_on_sleep(hour)
     GameManager:OnICustomAnimation("sleep_idle_0", "", true, 1.6)

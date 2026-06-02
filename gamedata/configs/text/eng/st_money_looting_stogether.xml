@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<string_table>
+	<string id="st_money_paper">
+		<text>Money Envelope</text>
+	</string>
+	<string id="st_money_paper_descr">
+		<text>An envelope containing a bundle of Soviet rubles found on a deceased stalker. Taking it will add the rubles to your wallet.</text>
+	</string>
+</string_table>
