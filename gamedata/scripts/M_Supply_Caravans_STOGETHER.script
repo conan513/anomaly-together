@@ -644,7 +644,7 @@ local DESTROYED_PHRASES = {
     ecolog = {
         "Institute convoy never arrived at %s. Cargo — %s — presumed lost. Field procurement will be impacted. Budget accordingly.",
         "Research supply chain disrupted. Convoy to %s wiped. %s now critically scarce. We are adjusting field prices.",
-        "Signal lost. %s convoy never reached %s. Data logged. Prices will reflect the disruption.",
+        "Signal lost. Convoy to %s never arrived. %s shipment lost. Prices will reflect the disruption.",
     },
     killer = {
         "Package never arrived at %s. Contents: %s. No further comment. Adjust your expectations — and your budget.",
@@ -659,7 +659,7 @@ local DESTROYED_PHRASES = {
     freedom = {
         "Convoy to %s is AWOL, brother. All that %s — gone with the wind. Nature of the Zone, yeah? Prices shift.",
         "Free market casualty: supply run to %s wiped. %s short now. Stay free, stay flexible.",
-        "The %s convoy never made %s. %s lost. Zone's entropy at work. Prices adjusted, naturally.",
+        "Convoy heading to %s never made it. Heavy loss of %s. Zone's entropy at work. Prices adjusted, naturally.",
     },
     csky = {
         "Clear Sky convoy to %s lost. Cargo — %s — not recovered. Zone's anomalous activity is to blame. Prices increased.",
