@@ -880,27 +880,79 @@ local function update_loot_sellers()
                     end
 
                     if not has_trader_nearby and math.random(100) <= 25 then
-                        -- Find faction's preferred trade base on the same level
                         local faction      = squad.player_id
-                        local trade_list   = FACTION_TRADE_SMARTS[faction]
                         local squad_level  = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
+
+                        local own_smarts = {}
+                        local friendly_smarts = {}
+
+                        -- Gather own faction's trade smarts on the same level
+                        local own_list = FACTION_TRADE_SMARTS[faction] or {}
+                        for _, smart_name in ipairs(own_list) do
+                            local smart = SIMBOARD.smarts_by_names[smart_name]
+                            if smart and smart.position and smart.m_game_vertex_id then
+                                local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
+                                if sl == squad_level then
+                                    table.insert(own_smarts, smart)
+                                end
+                            end
+                        end
+
+                        -- Gather friendly/neutral factions' trade smarts on the same level (excluding own smarts)
+                        local own_lookup = {}
+                        for _, smart in ipairs(own_smarts) do
+                            own_lookup[smart:name()] = true
+                        end
+
+                        local friendly_lookup = {}
+                        for fac, list in pairs(FACTION_TRADE_SMARTS) do
+                            if fac ~= faction then
+                                local is_friendly = true
+                                if game_relations and game_relations.is_factions_enemies then
+                                    is_friendly = not game_relations.is_factions_enemies(faction, fac)
+                                end
+                                if is_friendly then
+                                    for _, smart_name in ipairs(list) do
+                                        if not own_lookup[smart_name] and not friendly_lookup[smart_name] then
+                                            local smart = SIMBOARD.smarts_by_names[smart_name]
+                                            if smart and smart.position and smart.m_game_vertex_id then
+                                                local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
+                                                if sl == squad_level then
+                                                    table.insert(friendly_smarts, smart)
+                                                    friendly_lookup[smart_name] = true
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        -- Decide which set to use (75% own, 25% friendly/neutral)
+                        local candidates = {}
+                        local has_own = #own_smarts > 0
+                        local has_friendly = #friendly_smarts > 0
+
+                        if has_own and has_friendly then
+                            if math.random(100) <= 75 then
+                                candidates = own_smarts
+                            else
+                                candidates = friendly_smarts
+                            end
+                        elseif has_own then
+                            candidates = own_smarts
+                        elseif has_friendly then
+                            candidates = friendly_smarts
+                        end
 
                         local best_smart = nil
                         local best_dist  = 99999
 
-                        if trade_list then
-                            for _, smart_name in ipairs(trade_list) do
-                                local smart = SIMBOARD.smarts_by_names[smart_name]
-                                if smart and smart.position and smart.m_game_vertex_id then
-                                    local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
-                                    if sl == squad_level then
-                                        local d = squad.position:distance_to(smart.position)
-                                        if d < best_dist and d > 60 then
-                                            best_dist  = d
-                                            best_smart = smart
-                                        end
-                                    end
-                                end
+                        for _, smart in ipairs(candidates) do
+                            local d = squad.position:distance_to(smart.position)
+                            if d < best_dist and d > 60 then
+                                best_dist  = d
+                                best_smart = smart
                             end
                         end
 
