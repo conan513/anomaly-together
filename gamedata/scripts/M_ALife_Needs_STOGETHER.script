@@ -1,0 +1,833 @@
+--[[
+[================]
+M_ALife_Needs_STOGETHER.script
+Description: Physical needs (hunger, thirst, fatigue) simulation and active pathfinding goals
+             for online ALife NPCs.
+Written for Anomaly Together multiplayer.
+
+Closed Loop Logic:
+ 1. NPCs slowly grow hungry, thirsty, and fatigued.
+ 2. They physically consume food/drinks from their inventory to survive.
+ 3. If they run out, they buy necessities from traders using rubles earned from selling loot.
+ 4. Mutant Slayers hunt monsters, harvest trophies physically, and sell them.
+ 5. Artifact Hunters travel to anomaly fields on the level, use detectors, find artifacts, and sell them.
+ 6. At night, fatigued NPCs return to campfires or safe zones to sleep.
+[================]
+--]]
+
+local BASE_SMARTS = {
+    l01_escape     = "esc_smart_terrain_2_12",  -- Rookie Camp
+    l02_garbage    = "gar_smart_terrain_3_5",   -- Flea Market
+    l05_bar        = "bar_dolg_general",        -- Rostok Bar
+    l06_yantar     = "yan_smart_terrain_6_4",   -- Scientist Bunker
+    l07_military   = "mil_smart_terrain_7_7",   -- Army Warehouses
+    l09_deadcity   = "cit_smart_terrain_3_5",   -- Dead City Mercs
+    jupiter        = "jup_a6",                  -- Yanov Station
+    zaton          = "zat_stalker_base_smart",  -- Skadovsk
+    k00_marsh      = "mar_smart_terrain_base",  -- Clear Sky Base
+    l03_agroprom   = "agr_smart_terrain_1_6",   -- Agroprom base
+    l04_darkvalley = "val_smart_terrain_8_6",   -- Bandit base
+    red_forest     = "red_smart_terrain_6_3",   -- Forester Lodge
+}
+
+local FOOD_ITEMS = { "bread", "kolbasa", "conserva", "tushonka" }
+local DRINK_ITEMS = { "water_drink", "energy_drink", "vodka" }
+local ARTIFACT_LIST = { "af_cristall_flower", "af_blood", "af_medusa", "af_vyvert", "af_fireball", "af_electra_sparkler" }
+
+-- Keys = substring found in victim:section() (e.g. "bloodsucker_red_strong", "boar_weak")
+-- Values = item section from anims_loot_list.ltx  (mutant_part_ prefix)
+local MUTANT_TROPHIES = {
+    bloodsucker = "mutant_part_krovosos_jaw",
+    psysucker   = "mutant_part_krovosos_jaw",   -- psysucker variant
+    boar        = "mutant_part_boar_leg",
+    dog         = "mutant_part_dog_tail",
+    pseudodog   = "mutant_part_psevdodog_tail",
+    snork       = "mutant_part_snork_leg",
+    flesh       = "mutant_part_flesh_eye",
+    chimera     = "mutant_part_chimera_claw",
+    burer       = "mutant_part_brain_burer",
+    controller  = "mutant_part_controller_hand",
+    gigant      = "mutant_part_pseudogigant_hand",
+    lurker      = "mutant_part_lurker_tail",
+    cat         = "mutant_part_cat_tail",
+    fracture    = "mutant_part_burer_hand",      -- fracture uses burer hand trophy
+    zombie      = "mutant_part_zombi_hand",
+    tushkano    = "mutant_part_tushkano_head",
+}
+
+-- Previous needs snapshot tables
+local npc_prev_need_update = 0
+
+-- Helper: clean raw smart names to human readable
+local smart_prefix_map = {
+    esc = "Cordon",          gar = "Garbage",       agr = "Agroprom",
+    val = "Dark Valley",     bar = "Rostok",         yan = "Yantar",
+    mil = "Army Warehouses", rad = "Radar",          lim = "Limansk",
+    pri = "Pripyat",         cit = "Dead City",      red = "Red Forest",
+    jup = "Jupiter",         zat = "Zaton",          mar = "Great Swamps",
+    ds  = "Darkscape",       trc = "Truck Cemetery",
+}
+
+local function get_location_near(pos)
+    if not pos then return "the Zone" end
+    local nearest = nil
+    local min_dist = 999999
+    for _, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local d = pos:distance_to(smart.position)
+            if d < min_dist then
+                min_dist = d
+                local raw = smart:name()
+                if raw then
+                    local prefix = string.match(raw, "^([%a%d]+)_")
+                    if prefix and smart_prefix_map[prefix] then
+                        nearest = smart_prefix_map[prefix]
+                    elseif level and level.name then
+                        local ln = level.name()
+                        nearest = ln and ln:gsub("^l%d+_", ""):gsub("^%l", string.upper) or "the Zone"
+                    end
+                end
+            end
+        end
+    end
+    return nearest or (level and level.name and level.name() or "the Zone")
+end
+
+-- Helper: find the nearest smart terrain server object to a world position
+local function get_nearest_smart_at_pos(pos)
+    if not pos then return nil end
+    local nearest = nil
+    local min_dist = 999999
+    for _, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local d = pos:distance_to(smart.position)
+            if d < min_dist then
+                min_dist = d
+                nearest = smart
+            end
+        end
+    end
+    return nearest
+end
+
+-- Helper: try to consume the first item matching any of the sections
+local function npc_consume_item(npc, sections)
+    local consumed = false
+    npc:iterate_inventory(function(owner, item)
+        if consumed then return end
+        local sec = item:section()
+        for _, s in ipairs(sections) do
+            if sec == s then
+                local se_obj = alife_object(item:id())
+                if se_obj then
+                    pcall(function()
+                        alife():release(se_obj, true)
+                    end)
+                    consumed = true
+                end
+                return
+            end
+        end
+    end, npc)
+    return consumed
+end
+
+-- 1. Need updates (Hunger, Thirst, Fatigue)
+local function run_needs_simulation()
+    if not IIsHost() then return true end
+    if not db.actor then return true end
+
+    local stalkers = {}
+    for id, _ in pairs(db.storage) do
+        local obj = level.object_by_id(id)
+        if obj and IsStalker(obj) and obj:alive()
+           and id ~= AC_ID
+           and obj:character_community() ~= "trader" then
+            table.insert(stalkers, obj)
+        end
+    end
+    if #stalkers == 0 then return true end
+
+    local hr = level.get_time_hours()
+    local is_night = (hr >= 22 or hr < 6)
+
+    -- Update 6 random stalkers for performance budget
+    local count = math.min(6, #stalkers)
+    for _ = 1, count do
+        local npc = stalkers[math.random(#stalkers)]
+        local npc_id = npc:id()
+
+        -- Load variables or initialize
+        local hunger  = load_var(npc, "npc_hunger") or (math.random() * 0.4)
+        local thirst  = load_var(npc, "npc_thirst") or (math.random() * 0.4)
+        local fatigue = load_var(npc, "npc_fatigue") or (math.random() * 0.3)
+
+        -- Increment rates
+        hunger  = hunger + 0.015
+        thirst  = thirst + 0.025
+        fatigue = fatigue + 0.008
+
+        -- Night awake penalty
+        if is_night then
+            fatigue = fatigue + 0.01
+        end
+
+        -- Check consumption
+        if hunger > 0.70 then
+            if npc_consume_item(npc, FOOD_ITEMS) then
+                hunger = math.max(0.0, hunger - 0.6)
+            end
+        end
+
+        if thirst > 0.70 then
+            if npc_consume_item(npc, DRINK_ITEMS) then
+                thirst = math.max(0.0, thirst - 0.7)
+            end
+        end
+
+        -- Sleep / Rest check
+        local is_near_camp = false
+        local pos = npc:position()
+        for _, base_smart in pairs(BASE_SMARTS) do
+            local smart = SIMBOARD.smarts_by_names[base_smart]
+            if smart and smart.position then
+                if pos:distance_to(smart.position) < 65 then
+                    is_near_camp = true
+                    break
+                end
+            end
+        end
+
+        if is_near_camp then
+            -- Rapid resting recovery
+            fatigue = math.max(0.0, fatigue - 0.15)
+        end
+
+        -- Starvation / Dehydration damage
+        if hunger > 0.95 or thirst > 0.95 then
+            pcall(function()
+                npc.health = math.max(0.05, npc.health - 0.03)
+            end)
+        end
+
+        -- Save values
+        save_var(npc, "npc_hunger", hunger)
+        save_var(npc, "npc_thirst", thirst)
+        save_var(npc, "npc_fatigue", fatigue)
+    end
+
+    return true
+end
+
+-- Find a random non-base smart terrain on the current level for artifact hunts
+local function get_random_anomaly_smart()
+    local smarts = {}
+    for id, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local name = smart:name()
+            if name and name ~= "" then
+                local is_base = false
+                for _, base_name in pairs(BASE_SMARTS) do
+                    if name == base_name then
+                        is_base = true
+                        break
+                    end
+                end
+                if not is_base then
+                    table.insert(smarts, smart)
+                end
+            end
+        end
+    end
+    if #smarts > 0 then
+        return smarts[math.random(#smarts)]
+    end
+    return nil
+end
+
+-- 2. Artifact Hunting simulation for ArtifactHunter goal
+local function update_artifact_hunters()
+    if not IIsHost() then return true end
+    if not db.actor then return true end
+
+    local sim = alife()
+    for squad_id, _ in pairs(SIMBOARD.squads) do
+        local squad = sim:object(squad_id)
+        if squad and squad:npc_count() > 0 then
+            -- Exclude traders and unique story squads
+            local is_safe = (squad.player_id ~= "trader") and (get_object_story_id(squad.id) == nil)
+            if is_safe then
+                local sec = squad:section_name()
+                if sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                    is_safe = false
+                end
+            end
+            if is_safe then
+                local cmdr_id = squad:commander_id()
+                local cmdr_obj = level.object_by_id(cmdr_id)
+                if cmdr_obj and cmdr_obj:alive() and cmdr_obj:character_community() ~= "trader" and get_object_story_id(cmdr_id) == nil then
+                    local goal = load_var(cmdr_obj, "alife_goal")
+                    if goal == "ArtifactHunter" then
+                    -- Check if squad is busy
+                    local distress_target = se_load_var(squad.id, nil, "distress_target")
+                    local is_busy = false
+                    if distress_target then
+                        local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                        if target_smart and target_smart.position then
+                            local dist = squad.position:distance_to(target_smart.position)
+                            if dist < 45 then
+                                -- Completed previous task, release
+                                se_save_var(squad.id, nil, "distress_target", nil)
+                                squad.scripted_target = nil
+                            else
+                                is_busy = true
+                            end
+                        else
+                            se_save_var(squad.id, nil, "distress_target", nil)
+                        end
+                    end
+
+                    -- If not busy, 30% chance to dispatch them to search for artifacts
+                    if not is_busy and math.random(100) <= 30 then
+                        local target_smart = get_random_anomaly_smart()
+                        if target_smart then
+                            squad.scripted_target = target_smart:name()
+                            se_save_var(squad.id, nil, "distress_target", target_smart:name())
+                            se_save_var(squad.id, nil, "distress_time", time_global())
+                            
+                            -- Notify dispatch (rarely, to avoid spam)
+                            if math.random(100) <= 25 and news_manager then
+                                local cmdr_name = cmdr_obj:character_name() or "Stalker"
+                                local loc = get_location_near(target_smart.position)
+                                local msg = string.format("Leaving to search for artifact spawns near %s. Detector is armed.", loc)
+                                local comm = cmdr_obj:character_community() or ""
+                                local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                local caption = cmdr_name
+                                if comm_name ~= "" then
+                                    caption = caption .. " (" .. comm_name .. ")"
+                                end
+                                local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                            end
+                        end
+                    elseif is_busy and distress_target then
+                        -- Check if arrived at target smart terrain
+                        local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                        if target_smart and target_smart.position then
+                            local dist = squad.position:distance_to(target_smart.position)
+                            if dist < 45 then
+                                -- Arrived! Search finished
+                                se_save_var(squad.id, nil, "distress_target", nil)
+                                squad.scripted_target = nil
+
+                                -- 40% chance to physically find an artifact
+                                if math.random(100) <= 40 then
+                                    local art = ARTIFACT_LIST[math.random(#ARTIFACT_LIST)]
+                                    local pos = cmdr_obj:position()
+                                    local lv = cmdr_obj:level_vertex_id()
+                                    local gv = cmdr_obj:game_vertex_id()
+                                    pcall(function()
+                                        alife():create(art, pos, lv, gv, cmdr_id)
+                                    end)
+
+                                    -- Radio boast
+                                    if news_manager then
+                                        local cmdr_name = cmdr_obj:character_name() or "Stalker"
+                                        local loc = get_location_near(pos)
+                                        local art_disp = game.translate_string(art)
+                                        local msg = string.format("Jackpot! Found a rare %s near %s! Detector paid off.", art_disp, loc)
+                                        local comm = cmdr_obj:character_community() or ""
+                                        local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                        local caption = cmdr_name
+                                        if comm_name ~= "" then
+                                            caption = caption .. " (" .. comm_name .. ")"
+                                        end
+                                        local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                        
+                                        CreateTimeEvent(0, "art_hunter_find_" .. squad.id, math.random(2, 4), function()
+                                            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                                            return true
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+    return true
+end
+
+-- 3. Trophy harvesting for MutantSlayer goal
+function on_monster_kill(victim, killer)
+    if not IIsHost() then return end
+    if not victim or not killer then return end
+
+    if IsStalker(killer) and killer:alive() and killer:id() ~= AC_ID then
+        local goal = load_var(killer, "alife_goal")
+        if goal == "MutantSlayer" then
+            -- 60% chance to harvest trophy
+            if math.random(100) <= 60 then
+                local vic_sec = victim:section() or ""
+                local trophy = nil
+                
+                for k, item in pairs(MUTANT_TROPHIES) do
+                    if string.find(vic_sec, k) then
+                        trophy = item
+                        break
+                    end
+                end
+                
+                -- Fallback: generic dog tail (always exists)
+                if not trophy then
+                    trophy = "mutant_part_dog_tail"
+                end
+                
+                local pos = killer:position()
+                local lv = killer:level_vertex_id()
+                local gv = killer:game_vertex_id()
+                local killer_id = killer:id()
+                
+                pcall(function()
+                    alife():create(trophy, pos, lv, gv, killer_id)
+                end)
+                
+                -- Dynamic PDA boast
+                if math.random(100) <= 35 and news_manager then
+                    local loc = get_location_near(pos)
+                    local cmdr_name = killer:character_name() or "Stalker"
+                    local trophy_disp = game.translate_string(trophy)
+                    local msg = string.format("Dropped the beast near %s. Got a nice %s trophy. Traders will pay well.", loc, trophy_disp)
+                    local comm = killer:character_community() or ""
+                    local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                    local caption = cmdr_name
+                    if comm_name ~= "" then
+                        caption = caption .. " (" .. comm_name .. ")"
+                    end
+                    local sender = { caption = caption, texture = killer:character_icon() or "ui_iconsTotal_grouping" }
+                    
+                    CreateTimeEvent(0, "mutant_slayer_skin_" .. killer_id .. "_" .. time_global(), math.random(3, 5), function()
+                        news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                        return true
+                    end)
+                end
+            end
+        end
+    end
+end
+
+-- 4. Nocturnal Active Hunter goal (NightStalker)
+local function get_night_hunter_target(hunter_squad)
+    local hunter_faction = hunter_squad.player_id
+    local sim = alife()
+    local gg = game_graph()
+    local hunter_level = sim:level_name(gg:vertex(hunter_squad.m_game_vertex_id):level_id())
+    
+    local potential_targets = {}
+    for squad_id, _ in pairs(SIMBOARD.squads) do
+        if squad_id ~= hunter_squad.id then
+            local squad = sim:object(squad_id)
+            if squad and squad:npc_count() > 0 then
+                local squad_level = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
+                if squad_level == hunter_level then
+                    -- Check if monster
+                    local is_monster = false
+                    if is_squad_monster and is_squad_monster[squad.player_id] then
+                        is_monster = true
+                    end
+                    
+                    if not is_monster then
+                        -- Check relations: target is enemy
+                        local is_enemy = false
+                        if game_relations and game_relations.is_factions_enemies then
+                            is_enemy = game_relations.is_factions_enemies(hunter_faction, squad.player_id)
+                        end
+                        
+                        -- Monolith, killer and bandits can also target neutral Loners for hunting
+                        if not is_enemy and (hunter_faction == "bandit" or hunter_faction == "killer" or hunter_faction == "monolith") then
+                            if squad.player_id ~= hunter_faction then
+                                is_enemy = true
+                            end
+                        end
+                        
+                        if is_enemy then
+                            table.insert(potential_targets, squad)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    if #potential_targets > 0 then
+        return potential_targets[math.random(#potential_targets)]
+    end
+    return nil
+end
+
+local function update_night_hunters()
+    if not IIsHost() then return true end
+    if not db.actor then return true end
+
+    local hr = level.get_time_hours()
+    local is_night = (hr >= 22 or hr < 6)
+    local sim = alife()
+
+    for squad_id, _ in pairs(SIMBOARD.squads) do
+        local squad = sim:object(squad_id)
+        if squad and squad:npc_count() > 0 then
+            -- Exclude traders and unique story squads
+            local is_safe = (squad.player_id ~= "trader") and (get_object_story_id(squad.id) == nil)
+            if is_safe then
+                local sec = squad:section_name()
+                if sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                    is_safe = false
+                end
+            end
+            if is_safe then
+                local cmdr_id = squad:commander_id()
+                local cmdr_obj = level.object_by_id(cmdr_id)
+                if cmdr_obj and cmdr_obj:alive() and cmdr_obj:character_community() ~= "trader" and get_object_story_id(cmdr_id) == nil then
+                    local goal = load_var(cmdr_obj, "alife_goal")
+                    if goal == "NightStalker" then
+                    local distress_target = se_load_var(squad.id, nil, "distress_target")
+                    
+                    if not is_night then
+                        -- DAYTIME: Nocturnal hunters sleep! Send them to base
+                        local is_at_base = false
+                        local pos = squad.position
+                        local nearest_base = nil
+                        local min_d = 9999
+                        for _, base_name in pairs(BASE_SMARTS) do
+                            local b_smart = SIMBOARD.smarts_by_names[base_name]
+                            if b_smart and b_smart.position then
+                                local d = pos:distance_to(b_smart.position)
+                                if d < min_d then
+                                    min_d = d
+                                    nearest_base = b_smart
+                                end
+                            end
+                        end
+                        
+                        if nearest_base then
+                            if min_d < 45 then
+                                -- Resting at base, clear target and stay
+                                if distress_target then
+                                    se_save_var(squad.id, nil, "distress_target", nil)
+                                    squad.scripted_target = nil
+                                end
+                            else
+                                -- March back to sleep
+                                squad.scripted_target = nearest_base:name()
+                                se_save_var(squad.id, nil, "distress_target", nearest_base:name())
+                                se_save_var(squad.id, nil, "distress_time", time_global())
+                            end
+                        end
+                    else
+                        -- NIGHTTIME: Time to hunt down others!
+                        local is_busy = false
+                        if distress_target then
+                            local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                            if target_smart and target_smart.position then
+                                local dist = squad.position:distance_to(target_smart.position)
+                                if dist < 45 then
+                                    -- Completed leg, release to target
+                                    se_save_var(squad.id, nil, "distress_target", nil)
+                                    squad.scripted_target = nil
+                                else
+                                    is_busy = true
+                                end
+                            else
+                                se_save_var(squad.id, nil, "distress_target", nil)
+                            end
+                        end
+                        
+                        -- 40% chance to acquire a target squad if not busy
+                        if not is_busy and math.random(100) <= 40 then
+                            local victim = get_night_hunter_target(squad)
+                            if victim then
+                                local nearest_smart = get_nearest_smart_at_pos(victim.position)
+                                if nearest_smart then
+                                    squad.scripted_target = nearest_smart:name()
+                                    se_save_var(squad.id, nil, "distress_target", nearest_smart:name())
+                                    se_save_var(squad.id, nil, "distress_time", time_global())
+                                    
+                                    -- Send a chilling threat broadcast
+                                    if math.random(100) <= 60 and news_manager then
+                                        local loc = get_location_near(victim.position)
+                                        local cmdr_name = cmdr_obj:character_name() or "Night Stalker"
+                                        local phrases = {
+                                            "The night belongs to me. Tracking fresh prey near %s...",
+                                            "I see your campfires glowing near %s. None of you will see the sunrise.",
+                                            "No one escapes the dark. The hunt has begun in the sector of %s.",
+                                            "Shivering in the cold at %s? Don't look behind you.",
+                                            "Viktor here. I can smell your fear all the way from %s. See you soon.",
+                                        }
+                                        local msg = string.format(phrases[math.random(#phrases)], loc)
+                                        
+                                        local comm = cmdr_obj:character_community() or ""
+                                        local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                        local caption = cmdr_name
+                                        if comm_name ~= "" then
+                                            caption = caption .. " (" .. comm_name .. ")"
+                                        end
+                                        local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                        
+                                        CreateTimeEvent(0, "night_stalker_threat_" .. squad.id, math.random(1, 3), function()
+                                            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                                            return true
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+    return true
+end
+
+-- 5. Dynamic Player Bounty Contracts System
+local active_bounty_player_id = nil
+local active_bounty_reward = 0
+local active_bounty_faction = ""
+local active_bounty_trader = ""
+local active_bounty_expire_time = 0
+
+local function update_player_bounties()
+    if not IIsHost() then return true end
+    if not db.actor then return true end
+
+    local tg = time_global()
+
+    -- A) If a bounty is already active, check status
+    if active_bounty_player_id then
+        local target_player = level.object_by_id(active_bounty_player_id)
+        
+        -- Check for timeout survival
+        if tg >= active_bounty_expire_time then
+            local p_name = target_player and target_player:character_name() or "the stalker"
+            local msg = string.format("[CONTRACT EXPIRED] The bounty contract on %s has expired. The target has successfully evaded all hunters. The network warning is now cleared.", p_name)
+            
+            if news_manager then
+                news_manager.send_tip(db.actor, msg, nil, { caption = "Contract Closed", texture = "ui_iconsTotal_grouping" }, nil, nil, true)
+            end
+            
+            active_bounty_player_id = nil
+            return true
+        end
+
+        -- Check for player death
+        local is_dead = false
+        if target_player then
+            if not target_player:alive() then
+                is_dead = true
+            end
+        else
+            -- If targeted player goes offline/disconnects in MP, cancel silently
+            active_bounty_player_id = nil
+            return true
+        end
+
+        if is_dead then
+            local p_name = target_player:character_name() or "Stalker"
+            local msg = string.format("[CONTRACT CLOSED] Bounty target %s has been confirmed KIA! The contract is closed. %d Rubles have been paid out to the successful hunter.", p_name, active_bounty_reward)
+            
+            if news_manager then
+                news_manager.send_tip(db.actor, msg, nil, { caption = "Contract Completed", texture = "ui_iconsTotal_grouping" }, nil, nil, true)
+            end
+            
+            active_bounty_player_id = nil
+            return true
+        end
+
+        -- Periodically redirect BountyHunter squads on the level to target player
+        local sim = alife()
+        local gg = game_graph()
+        local player_pos = target_player:position()
+        local player_level = sim:level_name(gg:vertex(target_player:game_vertex_id()):level_id())
+        
+        for squad_id, _ in pairs(SIMBOARD.squads) do
+            local squad = sim:object(squad_id)
+            if squad and squad:npc_count() > 0 then
+                -- Exclude traders and unique story squads
+                local is_safe = (squad.player_id ~= "trader") and (get_object_story_id(squad.id) == nil)
+                if is_safe then
+                    local sec = squad:section_name()
+                    if sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                        is_safe = false
+                    end
+                end
+                if is_safe then
+                    local squad_level = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
+                    if squad_level == player_level then
+                        local cmdr_id = squad:commander_id()
+                        local cmdr_obj = level.object_by_id(cmdr_id)
+                        if cmdr_obj and cmdr_obj:alive() and cmdr_obj:character_community() ~= "trader" and get_object_story_id(cmdr_id) == nil then
+                            local goal = load_var(cmdr_obj, "alife_goal")
+                            if goal == "BountyHunter" then
+                            local is_enemy = false
+                            if game_relations and game_relations.is_factions_enemies then
+                                is_enemy = game_relations.is_factions_enemies(squad.player_id, target_player:character_community())
+                            end
+                            
+                            if is_enemy or squad.player_id == "bandit" or squad.player_id == "killer" or squad.player_id == "monolith" then
+                                local distress_target = se_load_var(squad.id, nil, "distress_target")
+                                local is_busy = false
+                                if distress_target then
+                                    local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                                    if target_smart and target_smart.position then
+                                        local dist = squad.position:distance_to(target_smart.position)
+                                        if dist < 40 then
+                                            se_save_var(squad.id, nil, "distress_target", nil)
+                                            squad.scripted_target = nil
+                                        else
+                                            is_busy = true
+                                        end
+                                    else
+                                        se_save_var(squad.id, nil, "distress_target", nil)
+                                    end
+                                end
+
+                                if not is_busy then
+                                    local nearest_smart = get_nearest_smart_at_pos(player_pos)
+                                    if nearest_smart then
+                                        squad.scripted_target = nearest_smart:name()
+                                        se_save_var(squad.id, nil, "distress_target", nearest_smart:name())
+                                        se_save_var(squad.id, nil, "distress_time", time_global())
+                                        
+                                        -- Broadcast hunt details (30% chance)
+                                        if math.random(100) <= 30 and news_manager then
+                                            local cmdr_name = cmdr_obj:character_name() or "Hunter"
+                                            local loc = get_location_near(player_pos)
+                                            local msg = string.format("Moving to sector %s. Signal locks are strong on the player bounty. Easiest money of my life.", loc)
+                                            
+                                            local comm = cmdr_obj:character_community() or ""
+                                            local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                            local caption = cmdr_name
+                                            if comm_name ~= "" then
+                                                caption = caption .. " (" .. comm_name .. ")"
+                                            end
+                                            local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        end
+
+    -- B) Spawn a new bounty contract with a 30% chance
+    else
+        if math.random(100) <= 30 then
+            -- Collect all alive online players
+            local online_players = {}
+            for id, data in pairs(db.actors or {}) do
+                local p_obj = data.object
+                if p_obj and p_obj:alive() then
+                    table.insert(online_players, p_obj)
+                end
+            end
+            if #online_players == 0 and db.actor and db.actor:alive() then
+                table.insert(online_players, db.actor)
+            end
+
+            if #online_players > 0 then
+                local target_player = online_players[math.random(#online_players)]
+                local p_comm = target_player:character_community() or "stalker"
+                local p_name = target_player:character_name() or "Stalker"
+                
+                -- Determine placing faction & trader based on player faction
+                local placing_faction = "bandit"
+                local placing_trader = "Sultan"
+                if p_comm == "stalker" or p_comm == "dolg" or p_comm == "csky" or p_comm == "ecolog" then
+                    local r = math.random(3)
+                    if r == 1 then
+                        placing_faction = "bandit"
+                        placing_trader = "Sultan"
+                    elseif r == 2 then
+                        placing_faction = "killer"
+                        placing_trader = "Dushman"
+                    else
+                        placing_faction = "monolith"
+                        placing_trader = "Charon"
+                    end
+                else
+                    local r = math.random(3)
+                    if r == 1 then
+                        placing_faction = "stalker"
+                        placing_trader = "Sidorovich"
+                    elseif r == 2 then
+                        placing_faction = "dolg"
+                        placing_trader = "Barkeep"
+                    else
+                        placing_faction = "freedom"
+                        placing_trader = "Skinflint"
+                    end
+                end
+
+                local reward = 20000 + math.random(10000, 30000)
+                active_bounty_player_id = target_player:id()
+                active_bounty_reward = reward
+                active_bounty_faction = placing_faction
+                active_bounty_trader = placing_trader
+                active_bounty_expire_time = tg + 720000 -- 12 minutes survival time
+
+                -- Send the bounty alert broadcast
+                if news_manager then
+                    local msg = string.format("[BOUNTY CONTRACT PLACED] A contract has been issued by %s (%s). %d Rubles will be awarded for the head of player %s! Last tracked near %s. Stay alert!", 
+                        placing_trader, game.translate_string(placing_faction), reward, p_name, get_location_near(target_player:position()))
+                    
+                    local sender = { caption = "Bounty Network", texture = "ui_iconsTotal_radiation" }
+                    news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                end
+            end
+        end
+    end
+
+    return true
+end
+
+function on_game_start()
+    -- Fast needs loop (every 25 seconds)
+    local function needs_loop()
+        run_needs_simulation()
+        ResetTimeEvent("alife_needs_timer", "update_needs", 25)
+        return false
+    end
+    CreateTimeEvent("alife_needs_timer", "update_needs", 10, needs_loop)
+
+    -- Slow artifact hunting loop (every 180 seconds)
+    local function art_loop()
+        update_artifact_hunters()
+        ResetTimeEvent("art_hunters_timer", "update_art", 180)
+        return false
+    end
+    CreateTimeEvent("art_hunters_timer", "update_art", 30, art_loop)
+
+    -- Nocturnal hunter loop (every 90 seconds)
+    local function night_loop()
+        update_night_hunters()
+        ResetTimeEvent("night_stalkers_timer", "update_night", 90)
+        return false
+    end
+    CreateTimeEvent("night_stalkers_timer", "update_night", 50, night_loop)
+
+    -- Player bounty loop (every 120 seconds)
+    local function bounty_loop()
+        update_player_bounties()
+        ResetTimeEvent("player_bounty_timer", "update_bounty", 120)
+        return false
+    end
+    CreateTimeEvent("player_bounty_timer", "update_bounty", 70, bounty_loop)
+end

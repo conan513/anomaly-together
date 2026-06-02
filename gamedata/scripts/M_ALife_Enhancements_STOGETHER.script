@@ -12,7 +12,7 @@ Procedural sentence builder for infinite variation and complete immersion.
 --]]
 
 local personalities = {"Scavenger", "Aggressor", "Survivor", "Coward", "Enforcer", "Merchant"}
-local goals = {"ArtifactHunter", "MutantSlayer", "BountyHunter"}
+local goals = {"ArtifactHunter", "MutantSlayer", "BountyHunter", "NightStalker"}
 
 local level_names = {
     l01_escape = "Cordon",
@@ -96,11 +96,10 @@ local function clean_raw_smart_name(raw_name)
     end
     local clean_rest = table.concat(words, " ")
     
-    if clean_rest == "" or clean_rest == "Smart" or clean_rest == "Terrain" then
-        clean_rest = "Sector"
-    end
-    
     local level_fullname = prefix and smart_prefixes[prefix] or get_readable_level_name()
+    if clean_rest == "" or clean_rest == "Smart" or clean_rest == "Terrain" then
+        return "somewhere in " .. level_fullname
+    end
     return clean_rest .. " in " .. level_fullname
 end
 
@@ -157,6 +156,19 @@ local function init_npc(npc)
     
     local npc_id = npc:id()
     if npc_id == AC_ID then return end
+    
+    -- Exclude traders and story/quest NPCs
+    if npc:character_community() == "trader" then return end
+    if get_object_story_id(npc_id) ~= nil then return end
+    
+    local squad = get_object_squad(npc)
+    if squad then
+        if get_object_story_id(squad.id) ~= nil then return end
+        local sec = squad:section_name()
+        if sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+            return
+        end
+    end
     
     local personality = load_var(npc, "alife_personality")
     local goal = load_var(npc, "alife_goal")
@@ -796,6 +808,11 @@ local function queue_message(message, npc, smart_id)
     local npc_id = npc and npc:id()
     local npc_name = npc and npc:character_name()
     
+    -- Filter out messages from hostile NPCs
+    if npc and db.actor and npc:relation(db.actor) == game_object.enemy then
+        return
+    end
+    
     -- HARD LIMIT: one message per NPC per queue cycle.
     -- Also catches same-frame double-kills before the timestamp cooldown can kick in.
     for _, item in ipairs(message_queue) do
@@ -858,29 +875,79 @@ local function trigger_npc_reaction(smart_id, reporter_id)
     for id, st in pairs(db.storage) do
         local obj = level.object_by_id(id)
         if obj and IsStalker(obj) and obj:alive() and id ~= AC_ID and id ~= reporter_id then
-            if not alife():has_info(id, "npcx_is_companion") then
-                local npc_name = obj:character_name()
-                local last_t = npc_name and npc_name_last_report[npc_name]
-                if not (last_t and tg < last_t + NPC_REPORT_COOLDOWN) then
-                    local personality = load_var(obj, "alife_personality")
-                    local comm = obj:character_community()
-                    
-                    -- Initialize personality if missing
-                    if not personality then
-                        init_npc(obj)
-                        personality = load_var(obj, "alife_personality")
-                    end
-                    
-                    -- Force faction enforcers dynamically for military/duty squads
-                    if comm == "dolg" or comm == "army" or comm == "freedom" or comm == "csky" then
-                        if math.random(100) < 40 then
-                            personality = "Enforcer"
+            if db.actor and obj:relation(db.actor) ~= game_object.enemy then
+                if not alife():has_info(id, "npcx_is_companion") then
+                    local npc_name = obj:character_name()
+                    local last_t = npc_name and npc_name_last_report[npc_name]
+                    if not (last_t and tg < last_t + NPC_REPORT_COOLDOWN) then
+                        local comm = obj:character_community()
+                        local squad = get_object_squad(obj)
+                        
+                        -- Exclude traders and unique/quest NPCs
+                        local is_safe = (comm ~= "trader") and (get_object_story_id(id) == nil)
+                        if is_safe and squad then
+                            if get_object_story_id(squad.id) ~= nil then is_safe = false end
+                            local sec = squad:section_name()
+                            if is_safe and sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                                is_safe = false
+                            end
+                        else
+                            is_safe = false
                         end
-                    end
-                    
-                    local squad = get_object_squad(obj)
-                    if squad then
-                        table.insert(candidates, {obj = obj, squad = squad, personality = personality, name = npc_name})
+                        
+                        if is_safe and squad then
+                            local personality = load_var(obj, "alife_personality")
+                            -- Initialize personality if missing
+                            if not personality then
+                                init_npc(obj)
+                                personality = load_var(obj, "alife_personality")
+                            end
+                            
+                            -- Force faction enforcers dynamically for military/duty squads
+                            if comm == "dolg" or comm == "army" or comm == "freedom" or comm == "csky" then
+                                if math.random(100) < 40 then
+                                    personality = "Enforcer"
+                                end
+                            end
+                            
+                            local is_busy = false
+                            local distress_target = se_load_var(squad.id, nil, "distress_target")
+                            if distress_target then
+                                local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                                if target_smart and target_smart.position then
+                                    local dist_to_target = squad.position:distance_to(target_smart.position)
+                                    if dist_to_target < 40 then
+                                        se_save_var(squad.id, nil, "distress_target", nil)
+                                        squad.scripted_target = nil
+                                    else
+                                        local last_time = se_load_var(squad.id, nil, "distress_time") or 0
+                                        local tg_now = time_global()
+                                        if tg_now < last_time + 300000 then
+                                            is_busy = true
+                                        else
+                                            se_save_var(squad.id, nil, "distress_target", nil)
+                                            squad.scripted_target = nil
+                                        end
+                                    end
+                                else
+                                    se_save_var(squad.id, nil, "distress_target", nil)
+                                end
+                            end
+                            
+                            if not is_busy then
+                                if squad.get_script_target and squad:get_script_target() then
+                                    is_busy = true
+                                elseif squad.scripted_target and squad.scripted_target ~= "" then
+                                    if not distress_target or squad.scripted_target ~= distress_target then
+                                        is_busy = true
+                                    end
+                                end
+                            end
+                            
+                            if not is_busy then
+                                table.insert(candidates, {obj = obj, squad = squad, personality = personality, name = npc_name})
+                            end
+                        end
                     end
                 end
             end
@@ -900,9 +967,10 @@ local function trigger_npc_reaction(smart_id, reporter_id)
     local personality = responder.personality
     local npc_name = responder.name
     
-    local smart_name = game.translate_string(target_smart:name())
-    if not smart_name or smart_name == "" or string.find(smart_name, "smart_terrain") then
-        smart_name = clean_raw_smart_name(target_smart:name())
+    local raw_name = target_smart:name()
+    local smart_name = game.translate_string(raw_name)
+    if not smart_name or smart_name == "" or smart_name == raw_name or string.find(smart_name, "smart_terrain") then
+        smart_name = clean_raw_smart_name(raw_name)
     end
     
     -- Procedurally build reaction message
@@ -911,8 +979,14 @@ local function trigger_npc_reaction(smart_id, reporter_id)
     -- Trigger physical pathfinding actions based on profile
     if personality == "Scavenger" or personality == "Aggressor" or personality == "Enforcer" then
         if xsquad and xsquad.acquire_squad then
-            xsquad.acquire_squad(squad, target_smart, true)
+            pcall(function()
+                xsquad.acquire_squad(squad, target_smart, true)
+            end)
+        else
+            squad.scripted_target = target_smart:name()
         end
+        se_save_var(squad.id, nil, "distress_target", target_smart:name())
+        se_save_var(squad.id, nil, "distress_time", time_global())
     elseif personality == "Coward" then
         local safe_smart = nil
         local min_dist = 999999
@@ -925,8 +999,16 @@ local function trigger_npc_reaction(smart_id, reporter_id)
                 end
             end
         end
-        if safe_smart and xsquad and xsquad.acquire_squad then
-            xsquad.acquire_squad(squad, safe_smart, true)
+        if safe_smart then
+            if xsquad and xsquad.acquire_squad then
+                pcall(function()
+                    xsquad.acquire_squad(squad, safe_smart, true)
+                end)
+            else
+                squad.scripted_target = safe_smart:name()
+            end
+            se_save_var(squad.id, nil, "distress_target", safe_smart:name())
+            se_save_var(squad.id, nil, "distress_time", time_global())
         end
     end
     
@@ -1163,6 +1245,13 @@ local function monster_on_death_callback(victim, killer)
         local message = generate_mutant_kill_msg(personality, location_name)
         
         queue_message(message, killer, nearest_smart and nearest_smart.id or nil)
+
+        -- Trigger physical trophy harvesting
+        if M_ALife_Needs_STOGETHER then
+            pcall(function()
+                M_ALife_Needs_STOGETHER.on_monster_kill(victim, killer)
+            end)
+        end
     end
 end
 
@@ -1174,6 +1263,22 @@ function on_game_start()
     if _G.M_ALIFE_ENHANCEMENTS_REGISTERED then return end
     _G.M_ALIFE_ENHANCEMENTS_REGISTERED = true
     
+    -- Global monkey-patch for game.translate_string to clean raw smart terrain names
+    if game and game.translate_string then
+        local orig_translate_string = game.translate_string
+        game.translate_string = function(key)
+            if not key then return "" end
+            local trans = orig_translate_string(key)
+            if trans == key and type(key) == "string" then
+                -- Check if it looks like a raw smart terrain key
+                if string.find(key, "^[a-z%d]+_smart_terrain_") or string.find(key, "^[a-z%d]+_u_") or string.find(key, "^[a-z%d]+_smart_") then
+                    return clean_raw_smart_name(key)
+                end
+            end
+            return trans
+        end
+    end
+    
     RegisterScriptCallback("npc_on_net_spawn", npc_on_net_spawn)
     RegisterScriptCallback("npc_on_death_callback", npc_on_death_callback)
     RegisterScriptCallback("monster_on_death_callback", monster_on_death_callback)
@@ -1181,4 +1286,12 @@ function on_game_start()
     
     -- Initialize NPC Memory & Reputation module (rescue detection, faction rep, secret stashes)
     M_NPC_Memory_STOGETHER.on_game_start()
+    
+    -- Initialize Dynamic Economy & Supply Caravans module
+    M_Supply_Caravans_STOGETHER.on_game_start()
+
+    -- Initialize Needs & Goals simulation
+    if M_ALife_Needs_STOGETHER then
+        M_ALife_Needs_STOGETHER.on_game_start()
+    end
 end

@@ -1,0 +1,1407 @@
+--[[
+[================]
+M_Supply_Caravans_STOGETHER.script
+Description: Dynamic Economy, Supply Caravans, and closed-loop NPC Loot & Trade system.
+Written for Anomaly Together multiplayer.
+
+Systems:
+ - Supply Caravans   : periodically spawns A-Life supply squads walking between bases on set routes.
+ - Dynamic Economy   : monitors caravan squad survival; arrival triggers trader price drops & premium stock injection;
+                       destruction triggers inflation & physical item shortages.
+ - Trade Patching    : dynamically intercepts trade_manager buy/sell discounts to adjust trader pricing.
+ - Stock Management  : iterates over trader inventory upon opening dialogue to physically purge scarce items or
+                       inject premium restocks in real-time.
+ - Grassroots Trade  : NPCs scan inventories for essential survival items (medkits, bandages, food, drinks);
+                       when in need, they buy from nearby base traders or campfire friendly peers.
+ - Loot Selling Loop : NPCs scan inventories for looted monster parts or weapons; sell them to base traders
+                       for rubles to finance their survival needs.
+ - Out of Stock Alert: PDA alerts fired when an NPC buys the last item of a category from a base trader.
+ - Persistence       : deterministic actor_on_save / actor_on_load binary packet saving of level economy states.
+[================]
+--]]
+
+-- ============================================================
+-- CONFIGURATION & CONSTANTS
+-- ============================================================
+
+local ECONOMY_LEVELS = {
+    "l01_escape",
+    "l02_garbage",
+    "l05_bar",
+    "l06_yantar",
+    "l07_military",
+    "l09_deadcity",
+    "jupiter",
+    "zaton",
+    "k00_marsh",
+    "l03_agroprom",
+    "l04_darkvalley",
+    "red_forest"
+}
+
+local BASE_SMARTS = {
+    l01_escape     = "esc_smart_terrain_2_12",  -- Rookie Camp
+    l02_garbage    = "gar_smart_terrain_3_5",   -- Flea Market
+    l05_bar        = "bar_dolg_general",        -- Rostok Bar
+    l06_yantar     = "yan_smart_terrain_6_4",   -- Scientist Bunker
+    l07_military   = "mil_smart_terrain_7_7",   -- Army Warehouses
+    l09_deadcity   = "cit_smart_terrain_3_5",   -- Dead City Mercs
+    jupiter        = "jup_a6",                  -- Yanov Station
+    zaton          = "zat_stalker_base_smart",  -- Skadovsk
+    k00_marsh      = "mar_smart_terrain_base",  -- Clear Sky Base
+    l03_agroprom   = "agr_smart_terrain_1_6",   -- Agroprom base
+    l04_darkvalley = "val_smart_terrain_8_6",   -- Bandit base
+    red_forest     = "red_smart_terrain_6_3",   -- Forester Lodge
+}
+
+local ROUTES = {
+    {
+        -- Cordon → Garbage  (1 segment × 10 min = 10 min total)
+        id = 1,  name = "Cordon-Garbage Supply Caravan",
+        source_level = "l01_escape",  dest_level = "l02_garbage",
+        faction = "stalker",          squad_section = "stalker_sim_squad_advanced",
+        cargo_name = "survival gear and ammunition",
+        shortage_type = 1,
+        segment_time_ms = 600000,
+        waypoints = {
+            "esc_smart_terrain_2_12",  -- Rookie Camp (Cordon)   ← departure
+            "gar_smart_terrain_3_5",   -- Flea Market (Garbage)  ← destination
+        },
+    },
+    {
+        -- Rostok → Army Warehouses  (2 segments × 10 min = 20 min total)
+        id = 2,  name = "Rostok-Military Tactical Caravan",
+        source_level = "l05_bar",  dest_level = "l07_military",
+        faction = "dolg",          squad_section = "duty_sim_squad_advanced",
+        cargo_name = "tactical ammunition and military supplies",
+        shortage_type = 1,
+        segment_time_ms = 600000,
+        waypoints = {
+            "bar_dolg_general",       -- Rostok Bar              ← departure
+            "agr_smart_terrain_1_6",  -- Agroprom base           ← midpoint
+            "mil_smart_terrain_7_7",  -- Army Warehouses         ← destination
+        },
+    },
+    {
+        -- Garbage → Yantar  (2 segments × 12.5 min = 25 min total)
+        id = 3,  name = "Garbage-Yantar Scientific Caravan",
+        source_level = "l02_garbage",  dest_level = "l06_yantar",
+        faction = "ecolog",            squad_section = "stalker_sim_squad_advanced",
+        cargo_name = "scientific instruments and medicine",
+        shortage_type = 2,
+        segment_time_ms = 750000,
+        waypoints = {
+            "gar_smart_terrain_3_5",  -- Flea Market (Garbage)   ← departure
+            "agr_smart_terrain_1_6",  -- Agroprom base           ← midpoint
+            "yan_smart_terrain_6_4",  -- Scientist Bunker        ← destination
+        },
+    },
+    {
+        -- Dead City → Zaton  (3 segments × ~12 min = ~35 min total)
+        id = 4,  name = "Dead City-Zaton Mercenary Caravan",
+        source_level = "l09_deadcity",  dest_level = "zaton",
+        faction = "killer",             squad_section = "merc_sim_squad_advanced",
+        cargo_name = "advanced western weapons and ammunition",
+        shortage_type = 3,
+        segment_time_ms = 700000,
+        waypoints = {
+            "cit_smart_terrain_3_5",   -- Dead City               ← departure
+            "red_smart_terrain_6_3",   -- Red Forest (Forester)   ← midpoint 1
+            "jup_a6",                  -- Yanov Station (Jupiter) ← midpoint 2
+            "zat_stalker_base_smart",  -- Skadovsk (Zaton)        ← destination
+        },
+    },
+    {
+        -- Swamps → Agroprom  (2 segments × 7.5 min = 15 min total)
+        id = 5,  name = "Swamps-Agroprom Pioneer Caravan",
+        source_level = "k00_marsh",  dest_level = "l03_agroprom",
+        faction = "csky",            squad_section = "csky_sim_squad_advanced",
+        cargo_name = "Clear Sky field supplies and shotgun shells",
+        shortage_type = 1,
+        segment_time_ms = 450000,
+        waypoints = {
+            "mar_smart_terrain_base",  -- Clear Sky Base (Swamps) ← departure
+            "esc_smart_terrain_2_12",  -- Rookie Camp (Cordon)    ← midpoint
+            "agr_smart_terrain_1_6",   -- Agroprom base           ← destination
+        },
+    },
+    {
+        -- Dark Valley → Garbage  (1 segment × 15 min = 15 min total)
+        id = 6,  name = "Dark Valley-Garbage Smuggler Caravan",
+        source_level = "l04_darkvalley",  dest_level = "l02_garbage",
+        faction = "bandit",               squad_section = "bandit_sim_squad_advanced",
+        cargo_name = "contraband medical packages and cheap ammunition",
+        shortage_type = 3,
+        segment_time_ms = 900000,
+        waypoints = {
+            "val_smart_terrain_8_6",  -- Bandit Base (Dark Valley) ← departure
+            "gar_smart_terrain_3_5",  -- Flea Market (Garbage)     ← destination
+        },
+    },
+    {
+        -- Jupiter → Zaton  (1 segment × 10 min = 10 min total)
+        id = 7,  name = "Jupiter-Zaton Northern Trade Caravan",
+        source_level = "jupiter",  dest_level = "zaton",
+        faction = "freedom",       squad_section = "freedom_sim_squad_advanced",
+        cargo_name = "heavy ammunition and scientific food rations",
+        shortage_type = 1,
+        segment_time_ms = 600000,
+        waypoints = {
+            "jup_a6",                 -- Yanov Station (Jupiter) ← departure
+            "zat_stalker_base_smart", -- Skadovsk (Zaton)        ← destination
+        },
+    },
+    {
+        -- Military → Red Forest  (1 segment × 25 min = 25 min total)
+        id = 8,  name = "Military-Red Forest Expedition Caravan",
+        source_level = "l07_military",  dest_level = "red_forest",
+        faction = "dolg",               squad_section = "duty_sim_squad_advanced",
+        cargo_name = "heavy protective medicine and military ammunition",
+        shortage_type = 3,
+        segment_time_ms = 1500000,
+        waypoints = {
+            "mil_smart_terrain_7_7",  -- Army Warehouses         ← departure
+            "red_smart_terrain_6_3",  -- Forester Lodge          ← destination
+        },
+    },
+}
+
+local ESSENTIAL_ITEMS = {
+    heal      = { "medkit", "medkit_army", "medkit_scientic" },
+    bandage   = { "bandage" },
+    food      = { "bread", "kolbasa", "conserva", "tushonka" },
+    drink     = { "energy_drink", "water_drink", "vodka" },
+    medicine  = { "antirad", "drug_psy_blockade", "drug_booster" },
+    cigarette = { "cigarettes", "cigarettes_lucky", "cigarettes_russian" },
+}
+
+-- ============================================================
+-- GAZDASÁGI ÁLLAPOT TÁBLA (ECONOMY STATE TABLE)
+-- ============================================================
+
+local level_economy = {}
+local route_cooldowns         = {0, 0, 0, 0, 0, 0, 0, 0}
+local active_caravan_ids      = {0, 0, 0, 0, 0, 0, 0, 0}
+local active_caravan_deadline = {0, 0, 0, 0, 0, 0, 0, 0}  -- tg deadline for current segment
+local active_caravan_waypoint = {2, 2, 2, 2, 2, 2, 2, 2}  -- index of current destination waypoint
+local active_caravan_npc_count= {0, 0, 0, 0, 0, 0, 0, 0}  -- last known member count (for casualty detection)
+
+-- Initialize starting values
+for _, lvl in ipairs(ECONOMY_LEVELS) do
+    level_economy[lvl] = {
+        price_multiplier = 1.0,
+        shortage_type = 0, -- 0=none, 1=ammo, 2=meds, 3=all
+        refreshed_stock_pending = false
+    }
+end
+
+-- ============================================================
+-- PERSISTENCE: actor_on_save / actor_on_load PACKET I/O
+-- ============================================================
+
+local function actor_on_save(packet)
+    if not packet then return end
+    packet:w_u8(3)  -- version 3: waypoints + remaining segment time
+    
+    for _, lvl in ipairs(ECONOMY_LEVELS) do
+        local eco = level_economy[lvl] or { price_multiplier = 1.0, shortage_type = 0, refreshed_stock_pending = false }
+        packet:w_float(eco.price_multiplier)
+        packet:w_u8(eco.shortage_type)
+        packet:w_bool(eco.refreshed_stock_pending)
+    end
+    
+    local tg = time_global()
+    for i = 1, 8 do
+        packet:w_u32(route_cooldowns[i] or 0)
+        packet:w_u32(active_caravan_ids[i] or 0)
+        -- Store remaining ms in current segment (safe across save/load)
+        local remaining = math.max(0, (active_caravan_deadline[i] or 0) - tg)
+        packet:w_u32(remaining)
+        packet:w_u8(active_caravan_waypoint[i] or 2)
+    end
+end
+
+local function actor_on_load(reader)
+    if not reader then return end
+    local version = reader:r_u8()
+    if not version then return end
+    
+    for _, lvl in ipairs(ECONOMY_LEVELS) do
+        local mult = reader:r_float() or 1.0
+        local sh   = reader:r_u8()   or 0
+        local ref  = reader:r_bool() or false
+        level_economy[lvl] = { price_multiplier = mult, shortage_type = sh, refreshed_stock_pending = ref }
+    end
+    
+    local tg = time_global()
+    for i = 1, 8 do
+        route_cooldowns[i]    = reader:r_u32() or 0
+        active_caravan_ids[i] = reader:r_u32() or 0
+        
+        if version >= 3 then
+            local remaining = reader:r_u32() or 0
+            -- Reconstruct absolute deadline from remaining time
+            active_caravan_deadline[i] = (remaining > 0) and (tg + remaining) or 0
+            active_caravan_waypoint[i] = reader:r_u8() or 2
+        elseif version >= 2 then
+            reader:r_u32()  -- skip old spawn_time field (v2)
+            active_caravan_deadline[i] = 0
+            active_caravan_waypoint[i] = 2
+        end
+    end
+end
+
+-- ============================================================
+-- LOCAL LOCATION NAME PARSER HELPER
+-- ============================================================
+
+local smart_prefix_map = {
+    esc = "Cordon",          gar = "Garbage",       agr = "Agroprom",
+    val = "Dark Valley",     bar = "Rostok",         yan = "Yantar",
+    mil = "Army Warehouses", rad = "Radar",          lim = "Limansk",
+    pri = "Pripyat",         cit = "Dead City",      red = "Red Forest",
+    jup = "Jupiter",         zat = "Zaton",          mar = "Great Swamps",
+    ds  = "Darkscape",       trc = "Truck Cemetery",
+}
+
+local function get_location_near(pos)
+    if not pos then return "the Zone" end
+    local nearest = nil
+    local min_dist = 999999
+    for _, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local d = pos:distance_to(smart.position)
+            if d < min_dist then
+                min_dist = d
+                local raw = smart:name()
+                if raw then
+                    local prefix = string.match(raw, "^([%a%d]+)_")
+                    if prefix and smart_prefix_map[prefix] then
+                        nearest = smart_prefix_map[prefix]
+                    elseif level and level.name then
+                        local ln = level.name()
+                        nearest = ln and ln:gsub("^l%d+_", ""):gsub("^%l", string.upper) or "the Zone"
+                    end
+                end
+            end
+        end
+    end
+    return nearest or (level and level.name and level.name() or "the Zone")
+end
+
+local function get_nearest_smart_at_pos(pos)
+    if not pos then return nil end
+    local nearest = nil
+    local min_dist = 999999
+    for id, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position then
+            local d = pos:distance_to(smart.position)
+            if d < min_dist then
+                min_dist = d
+                nearest = smart
+            end
+        end
+    end
+    return nearest
+end
+
+local function dispatch_distress_responders(caravan_squad)
+    if not (caravan_squad and caravan_squad.position) then return end
+    
+    local nearest_smart = get_nearest_smart_at_pos(caravan_squad.position)
+    if not nearest_smart then return end
+    
+    local sim = alife()
+    local gg = game_graph()
+    local caravan_pos = caravan_squad.position
+    local caravan_faction = caravan_squad.player_id or "stalker"
+    
+    local caravan_level = sim:level_name(gg:vertex(caravan_squad.m_game_vertex_id):level_id())
+    
+    for squad_id, _ in pairs(SIMBOARD.squads) do
+        if squad_id ~= caravan_squad.id then
+            local squad = sim:object(squad_id)
+            if squad and squad:npc_count() > 0 then
+                -- Check if squad is busy on a previous distress response or other scripted task
+                local is_busy = false
+                local distress_target = se_load_var(squad.id, nil, "distress_target")
+                if distress_target then
+                    local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                    if target_smart and target_smart.position then
+                        local dist_to_target = squad.position:distance_to(target_smart.position)
+                        if dist_to_target < 40 then
+                            -- Arrived at target! Clear distress status
+                            se_save_var(squad.id, nil, "distress_target", nil)
+                            squad.scripted_target = nil
+                        else
+                            local last_time = se_load_var(squad.id, nil, "distress_time") or 0
+                            local tg = time_global()
+                            if tg < last_time + 300000 then -- 5 min limit
+                                is_busy = true
+                            else
+                                -- Timeout, release
+                                se_save_var(squad.id, nil, "distress_target", nil)
+                                squad.scripted_target = nil
+                            end
+                        end
+                    else
+                        se_save_var(squad.id, nil, "distress_target", nil)
+                    end
+                end
+
+                -- Check if they are on some other official quest/script task
+                if not is_busy then
+                    if squad.get_script_target and squad:get_script_target() then
+                        is_busy = true
+                    elseif squad.scripted_target and squad.scripted_target ~= "" then
+                        if not distress_target or squad.scripted_target ~= distress_target then
+                            is_busy = true
+                        end
+                    end
+                end
+
+                if not is_busy then
+                    -- Check level
+                    local squad_level = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
+                    if caravan_level == squad_level then
+                        -- Check if squad is player's companion squad
+                        local is_safe = not (axr_companions and axr_companions.companion_squads and axr_companions.companion_squads[squad_id])
+                        if is_safe then
+                            if get_object_story_id(squad.id) ~= nil then is_safe = false end
+                            local sec = squad:section_name()
+                            if is_safe and sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                                is_safe = false
+                            end
+                            if is_safe and (squad.player_id == "trader") then
+                                is_safe = false
+                            end
+                        end
+                        if is_safe then
+                            -- Check if squad is human (stalker) and not monster
+                            if not (is_squad_monster and is_squad_monster[squad.player_id]) then
+                                -- Check relations: not enemy to caravan faction
+                                local is_enemy = false
+                                if game_relations and game_relations.is_factions_enemies then
+                                    is_enemy = game_relations.is_factions_enemies(squad.player_id, caravan_faction)
+                                end
+                                
+                                if not is_enemy then
+                                    -- Check distance
+                                    local dist = squad.position:distance_to(caravan_pos)
+                                    if dist <= 350 then -- 350 meters
+                                        local cmdr_id = squad:commander_id()
+                                        local cmdr_obj = level.object_by_id(cmdr_id)
+                                        if cmdr_obj and cmdr_obj:alive() and cmdr_obj:character_community() ~= "trader" and get_object_story_id(cmdr_id) == nil then
+                                            -- Check relation with player
+                                            if db.actor and cmdr_obj:relation(db.actor) ~= game_object.enemy then
+                                                -- Load personality
+                                                local personality = load_var(cmdr_obj, "alife_personality")
+                                                if not personality then
+                                                    local pers_list = {"Scavenger", "Aggressor", "Survivor", "Coward", "Enforcer", "Merchant"}
+                                                    personality = pers_list[math.random(#pers_list)]
+                                                    save_var(cmdr_obj, "alife_personality", personality)
+                                                end
+                                                
+                                                if personality == "Enforcer" or personality == "Aggressor" or personality == "Scavenger" then
+                                                    -- Save distress response status
+                                                    se_save_var(squad.id, nil, "distress_target", nearest_smart:name())
+                                                    se_save_var(squad.id, nil, "distress_time", time_global())
+
+                                                    -- Redirect squad to nearest smart terrain to the caravan
+                                                    if xsquad and xsquad.acquire_squad then
+                                                        pcall(function()
+                                                            xsquad.acquire_squad(squad, nearest_smart, true)
+                                                        end)
+                                                    else
+                                                        squad.scripted_target = nearest_smart:name()
+                                                    end
+                                                
+                                                -- Send a radio response message on the PDA with 40% chance
+                                                if math.random(100) <= 40 then
+                                                    local phrase = ""
+                                                    local cmdr_name = cmdr_obj:character_name() or "Stalker"
+                                                    local loc_name = get_location_near(caravan_pos)
+                                                    
+                                                    if personality == "Enforcer" then
+                                                        phrase = string.format("This is %s. Hang on, we hear you! Squad is moving in to support at %s!", cmdr_name, loc_name)
+                                                    elseif personality == "Aggressor" then
+                                                        phrase = string.format("Finally, some action. %s here, we are heading to %s to help wipe them out!", cmdr_name, loc_name)
+                                                    elseif personality == "Scavenger" then
+                                                        phrase = string.format("Heard the distress call from %s. We are close, moving to the sector now!", cmdr_name, loc_name)
+                                                    end
+                                                    
+                                                    if phrase ~= "" and db.actor and news_manager then
+                                                        local comm = cmdr_obj:character_community() or ""
+                                                        local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                                        local caption = cmdr_name
+                                                        if comm_name ~= "" then
+                                                            caption = caption .. " (" .. comm_name .. ")"
+                                                        end
+                                                        local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                                        
+                                                        CreateTimeEvent(0, "responder_msg_" .. squad_id, math.random(2, 4), function()
+                                                            news_manager.send_tip(db.actor, phrase, nil, sender, nil, nil, true)
+                                                            return true
+                                                        end)
+                                                    end
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+end
+
+
+-- ============================================================
+-- NPC HAZARD SIMULATION HELPERS
+-- ============================================================
+
+-- Read highest radiation_protection value from NPC's equipped suit
+local function get_npc_rad_protection(npc)
+    local best = 0
+    local ini  = system_ini()
+    npc:iterate_inventory(function(owner, item)
+        local sec = item:section()
+        if ini:section_exist(sec) and ini:line_exist(sec, "radiation_protection") then
+            local v = ini:r_float(sec, "radiation_protection") or 0
+            if v > best then best = v end
+        end
+    end, npc)
+    return best
+end
+
+-- Try to make an NPC use the first found item matching any of the given sections
+local function npc_use_item_section(npc, sections)
+    local used = false
+    npc:iterate_inventory(function(owner, item)
+        if used then return end
+        for _, sec in ipairs(sections) do
+            if item:section() == sec then
+                pcall(function() npc:use_item(item) end)
+                used = true
+                return
+            end
+        end
+    end, npc)
+    return used
+end
+
+-- Set squad's scripted_target to the nearest safe smart terrain so the squad flees
+local function flee_squad_to_nearest_safe(npc)
+    local se_npc = alife_object(npc:id())
+    if not se_npc then return end
+    local squad = alife_object(se_npc.group_id)
+    if not squad then return end
+
+    -- Exclude traders, story/quest NPCs/squads, and non-simulation squads
+    local is_safe = (npc:character_community() ~= "trader") and (get_object_story_id(npc:id()) == nil)
+    if is_safe and squad then
+        if get_object_story_id(squad.id) ~= nil then is_safe = false end
+        local sec = squad:section_name()
+        if is_safe and sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+            is_safe = false
+        end
+    else
+        is_safe = false
+    end
+    if not is_safe then return end
+
+    local best_name = nil
+    local best_dist = 9999
+    local pos = npc:position()
+    for name, smart in pairs(SIMBOARD.smarts_by_names or {}) do
+        if smart and smart.position then
+            local d = pos:distance_to(smart.position)
+            -- Must be at least 20 m away (so we actually move AWAY from danger)
+            if d > 20 and d < best_dist then
+                best_dist = d
+                best_name = name
+            end
+        end
+    end
+    if best_name then
+        squad.scripted_target = best_name
+        se_save_var(squad.id, nil, "distress_target", best_name)
+        se_save_var(squad.id, nil, "distress_time", time_global())
+    end
+end
+
+-- Previous health snapshot table used to detect rapid health drops (anomaly hits)
+local npc_prev_hp = {}
+
+-- Main hazard update: radiation damage, antirad/cigarette use, anomaly flee
+local function run_npc_hazard_simulation()
+    if not IIsHost() then return end
+
+    local stalkers = {}
+    for id, _ in pairs(db.storage) do
+        local obj = level.object_by_id(id)
+        if obj and IsStalker(obj) and obj:alive()
+           and id ~= AC_ID
+           and obj:character_community() ~= "trader" then
+            table.insert(stalkers, obj)
+        end
+    end
+    if #stalkers == 0 then return end
+
+    -- Process a small random subset every tick for CPU budget
+    local count = math.min(6, #stalkers)
+    for _ = 1, count do
+        local npc    = stalkers[math.random(#stalkers)]
+        local npc_id = npc:id()
+        local hp     = npc.health
+
+        -- ==== RADIATION ====
+        local rad = npc.radiation
+        if rad > 0.08 then
+            local rad_prot = get_npc_rad_protection(npc)
+            local eff_rad  = rad * math.max(0.0, 1.0 - rad_prot)
+
+            -- Scale damage: full suit (1.0 protection) → no damage; bare skin (0.0) → full damage
+            if eff_rad > 0.04 then
+                pcall(function()
+                    npc:change_health(-(eff_rad * 0.005))
+                end)
+            end
+
+            -- Use antirad when radiation is noticeable
+            if eff_rad > 0.18 then
+                npc_use_item_section(npc, { "antirad" })
+            end
+
+            -- Flee from critical radiation zone
+            if eff_rad > 0.45 then
+                flee_squad_to_nearest_safe(npc)
+            end
+        end
+
+        -- ==== PSY / CIGARETTE ====
+        -- npc.psy_health may not exist on all builds, wrap defensively
+        pcall(function()
+            local psy = npc.psy_health
+            if psy and psy < 0.35 then
+                -- cigarette first (mild), then psy blocker (stronger)
+                if not npc_use_item_section(npc, { "cigarettes", "cigarettes_lucky", "cigarettes_russian" }) then
+                    npc_use_item_section(npc, { "drug_psy_blockade" })
+                end
+            end
+        end)
+
+        -- ==== ANOMALY ZONE DETECTION (rapid health loss without radiation) ====
+        local prev_hp = npc_prev_hp[npc_id]
+        if prev_hp then
+            -- More than 4 % health lost in one 3-second tick from a non-radiation source
+            -- → NPC is inside an anomaly field; make them flee immediately
+            if (hp - prev_hp) < -0.04 and rad < 0.08 then
+                flee_squad_to_nearest_safe(npc)
+                -- Emergency heal if critical
+                if hp < 0.25 then
+                    npc_use_item_section(npc, { "medkit_army", "medkit", "medkit_scientic" })
+                end
+            end
+        end
+        npc_prev_hp[npc_id] = hp
+
+        -- ==== PASSIVE LOW-HEALTH MEDKIT USE ====
+        if hp < 0.30 then
+            npc_use_item_section(npc, { "medkit_army", "medkit", "medkit_scientic" })
+        end
+    end
+end
+
+-- ============================================================
+-- CARAVAN STATE EVENTS
+-- ============================================================
+
+-- ============================================================
+-- CARAVAN EVENT NOTIFICATION PHRASES
+-- ============================================================
+
+-- Destruction: the trader/dispatcher at the destination breaks the bad news
+local DESTROYED_PHRASES = {
+    stalker = {
+        "Lost contact with the convoy heading to %s. Cargo was %s. Prices are going up — sorry, guys.",
+        "Convoy confirmed destroyed before reaching %s. No %s delivery today. Stock is thin, watch your wallets.",
+        "Bad news. The supply run to %s didn't make it. %s shortage is now real. Zone took another bite out of us.",
+    },
+    dolg = {
+        "Tactical supply column for %s is gone. Lost all %s aboard. Duty will compensate from reserves — prices adjusted accordingly.",
+        "Command reports: convoy to %s eliminated. %s shipment lost. Standby for emergency resupply protocols.",
+        "Duty convoy destroyed en route to %s. Full loss of %s. Discipline will not waver — but costs will rise.",
+    },
+    ecolog = {
+        "Institute convoy never arrived at %s. Cargo — %s — presumed lost. Field procurement will be impacted. Budget accordingly.",
+        "Research supply chain disrupted. Convoy to %s wiped. %s now critically scarce. We are adjusting field prices.",
+        "Signal lost. %s convoy never reached %s. Data logged. Prices will reflect the disruption.",
+    },
+    killer = {
+        "Package never arrived at %s. Contents: %s. No further comment. Adjust your expectations — and your budget.",
+        "Merc convoy to %s is gone. %s lost. Price of doing business in the Zone. Rates updated.",
+        "Shipment to %s didn't make it. %s is now short. Professionals understand: costs follow risk.",
+    },
+    bandit = {
+        "Ey, the run to %s got smoked. Gear was %s. We ain't cheap no more, stalker. Make peace with that.",
+        "Job to %s went sideways. Lost the whole stash — %s. Not our fault. You pay the difference.",
+        "Word from the street: our boys never reached %s. %s is gone. Prices up. Don't like it? Cry about it.",
+    },
+    freedom = {
+        "Convoy to %s is AWOL, brother. All that %s — gone with the wind. Nature of the Zone, yeah? Prices shift.",
+        "Free market casualty: supply run to %s wiped. %s short now. Stay free, stay flexible.",
+        "The %s convoy never made %s. %s lost. Zone's entropy at work. Prices adjusted, naturally.",
+    },
+    csky = {
+        "Clear Sky convoy to %s lost. Cargo — %s — not recovered. Zone's anomalous activity is to blame. Prices increased.",
+        "Field operations report: supply column destroyed before %s. %s depleted. Re-routing is planned.",
+    },
+    default = {
+        "Convoy to %s wiped out. Cargo — %s — lost entirely. Shortage expected. Prices have risen.",
+        "Supply column never made it to %s. %s is now scarce. The Zone is not forgiving today.",
+    },
+}
+
+-- Arrival: the base dispatcher or trader acknowledges the delivery
+local ARRIVED_PHRASES = {
+    stalker = {
+        "Convoy's in! %s is now fully stocked with %s. Sidorovich says prices are down — grab it while it lasts.",
+        "Good news from %s — the supply run made it through clean. %s is back on the shelves. Go stock up.",
+        "All units: delivery confirmed at %s. %s available at reduced prices for a limited time.",
+    },
+    dolg = {
+        "Duty convoy has reached %s. %s delivery confirmed. Combat effectiveness is restored. Current prices: discounted.",
+        "Supply column arrived at %s on schedule. %s secured and distributed. Duty never fails its people.",
+        "Tactical resupply complete at %s. %s available. Duty honors its commitments — so should you.",
+    },
+    ecolog = {
+        "Institute convoy has arrived at %s. Full %s manifest confirmed. Research proceeds. Acquisition prices reduced.",
+        "Supply delivery to %s successful. %s now available at field-rate pricing. Science marches on.",
+        "Convoy reached %s intact. %s stocked. Discounts active for accredited personnel and associates.",
+    },
+    killer = {
+        "Package delivered. %s now has %s in stock. Discounts are live — make use of them before the window closes.",
+        "Merc supply run to %s completed. %s on hand. Professionals shop smart. Now's the time.",
+        "Delivery confirmed at %s. %s stocked. Limited discount window is open — keep it professional.",
+    },
+    bandit = {
+        "Ey, the boys made it to %s! Got a fat load of %s. Prices are sweet right now — don't miss out.",
+        "Run to %s went smooth. %s dropped off. Hit the market while prices are low, stalker.",
+        "Delivery done. %s is flush with %s. Grab it cheap before someone else does.",
+    },
+    freedom = {
+        "Freedom convoy rolled into %s, no sweat! %s is flowing. Prices are beautiful right now, brother.",
+        "The run to %s was a good trip. %s available. Zone smiled on us today — prices reflect that.",
+        "We made it to %s with the whole load of %s. Discounts active. Share the good vibes.",
+    },
+    csky = {
+        "Clear Sky convoy reached %s safely. %s delivered as planned. Zone anomalies were navigated successfully.",
+        "Field team confirms delivery at %s. %s available at reduced cost. Operation successful.",
+    },
+    default = {
+        "Supply convoy arrived at %s. %s now in stock. Prices down for a limited time.",
+        "Delivery complete. %s has %s available at reduced prices. Act fast.",
+    },
+}
+
+local function get_faction_phrases(tbl, faction)
+    return tbl[faction] or tbl["default"]
+end
+
+local function on_caravan_destroyed(route_id, route)
+    local dest_lvl = route.dest_level
+    local eco = level_economy[dest_lvl]
+    if eco then
+        -- 1.6x to 2.0x inflation
+        eco.price_multiplier = 1.6 + (math.random() * 0.4)
+        eco.shortage_type = route.shortage_type
+        eco.refreshed_stock_pending = false
+    end
+
+    local dest_disp = route.dest_level:gsub("^l%d+_", ""):gsub("^%l", string.upper)
+    local phrases = get_faction_phrases(DESTROYED_PHRASES, route.faction)
+    local msg = string.format(phrases[math.random(#phrases)], dest_disp, route.cargo_name)
+
+    -- Caption is a named contact at the destination base, feel varies by faction
+    local captions = {
+        stalker = "Sidorovich",  dolg = "Duty Command",  ecolog = "Institute Dispatch",
+        killer  = "Dushman",     bandit = "Sultan",       freedom = "Loki",
+        csky    = "Clear Sky HQ",
+    }
+    local caption = captions[route.faction] or "Zone Trade Network"
+    local sender  = { caption = caption, texture = "ui_iconsTotal_grouping" }
+
+    if db.actor and news_manager then
+        if game_relations and game_relations.is_factions_enemies then
+            local actor_comm = db.actor:character_community()
+            if actor_comm and not game_relations.is_factions_enemies(actor_comm, route.faction) then
+                news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+            end
+        else
+            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+        end
+    end
+end
+
+local function on_caravan_arrived(route_id, route)
+    local dest_lvl = route.dest_level
+    local eco = level_economy[dest_lvl]
+    if eco then
+        -- 0.8x to 0.9x discount
+        eco.price_multiplier = 0.8 + (math.random() * 0.1)
+        eco.shortage_type = 0
+        eco.refreshed_stock_pending = true
+    end
+
+    local dest_disp = route.dest_level:gsub("^l%d+_", ""):gsub("^%l", string.upper)
+    local phrases = get_faction_phrases(ARRIVED_PHRASES, route.faction)
+    local msg = string.format(phrases[math.random(#phrases)], dest_disp, route.cargo_name)
+
+    local captions = {
+        stalker = "Sidorovich",  dolg = "Duty Command",  ecolog = "Institute Dispatch",
+        killer  = "Dushman",     bandit = "Sultan",       freedom = "Loki",
+        csky    = "Clear Sky HQ",
+    }
+    local caption = captions[route.faction] or "Zone Trade Network"
+    local sender  = { caption = caption, texture = "ui_iconsTotal_grouping" }
+
+    if db.actor and news_manager then
+        if game_relations and game_relations.is_factions_enemies then
+            local actor_comm = db.actor:character_community()
+            if actor_comm and not game_relations.is_factions_enemies(actor_comm, route.faction) then
+                news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+            end
+        else
+            news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+        end
+    end
+end
+
+-- ============================================================
+-- A-LIFE CARAVAN SPAWNER & TRACKER (Host-Only)
+-- ============================================================
+
+-- Convert a raw smart terrain name into a human-readable location name
+local function get_smart_display_name(smart_name)
+    if not smart_name then return "the Zone" end
+    local prefix = string.match(smart_name, "^([%a]+)_")
+    return (prefix and smart_prefix_map[prefix]) or smart_name
+end
+
+-- ============================================================
+-- A-LIFE CARAVAN SPAWNER & TRACKER WITH WAYPOINTS (Host-Only)
+-- ============================================================
+
+local function send_caravan_msg(msg, route)
+    if not (db.actor and news_manager) then return end
+    local sender = { caption = "Trade Network", texture = "ui_iconsTotal_grouping" }
+    local function do_send()
+        news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+    end
+    if game_relations and game_relations.is_factions_enemies then
+        local actor_comm = db.actor:character_community()
+        if actor_comm and not game_relations.is_factions_enemies(actor_comm, route.faction) then
+            do_send()
+        end
+    else
+        do_send()
+    end
+end
+
+-- Distress call phrases — the commander speaks in first person over the radio
+local DISTRESS_PHRASES = {
+    "%s here — MAYDAY! We're under attack near %s! Caravan is taking fire! Anyone close, respond!",
+    "%s reporting — Ambush near %s! We have casualties! Need immediate backup!",
+    "%s calling all units — heavy contact near %s! We're pinned down! Send help!",
+    "%s here, we're hit near %s! Men down! If anyone can hear this — get here fast!",
+    "This is %s — taking fire near %s! Caravan under attack! Respond on this frequency!",
+}
+
+local function update_caravans()
+    if not IIsHost() then return end
+    if not db.actor then return end
+    local tg = time_global()
+    
+    for i, route in ipairs(ROUTES) do
+        local squad_id = active_caravan_ids[i]
+        
+        if squad_id == 0 then
+            -- No active caravan — check spawn cooldown
+            if tg > (route_cooldowns[i] or 0) and math.random(100) <= 35 then
+                route_cooldowns[i] = tg + math.random(240000, 480000)
+                
+                local src_smart = route.waypoints[1]
+                local smart_src = SIMBOARD.smarts_by_names[src_smart]
+                if smart_src then
+                    local sq = SIMBOARD:create_squad(smart_src, route.squad_section)
+                    if sq then
+                        sq.scripted_target          = route.waypoints[2]
+                        active_caravan_ids[i]       = sq.id
+                        active_caravan_deadline[i]  = tg + route.segment_time_ms
+                        active_caravan_waypoint[i]  = 2
+                        
+                        -- Count initial members
+                        local cnt = 0
+                        for _ in pairs(sq.npc_info or {}) do cnt = cnt + 1 end
+                        active_caravan_npc_count[i] = cnt
+                        
+                        -- Departure: commander speaks in character on the radio
+                        local src_disp  = route.source_level:gsub("^l%d+_", ""):gsub("^%l", string.upper)
+                        local dest_disp = route.dest_level:gsub("^l%d+_", ""):gsub("^%l", string.upper)
+                        local total_min = math.floor(route.segment_time_ms * (#route.waypoints - 1) / 60000)
+
+                        -- Try to get the commander's actual name from the server object
+                        local cmdr_name = route.name
+                        pcall(function()
+                            local cmdr_id = sq:commander_id()
+                            local cmdr_se = cmdr_id and alife_object(cmdr_id)
+                            if cmdr_se then
+                                local n = cmdr_se:character_name()
+                                if n and n ~= "" then cmdr_name = n end
+                            end
+                        end)
+
+                        local DEPARTURE_PHRASES = {
+                            stalker = {
+                                "%s here. We're moving out from %s, headed to %s. Carrying %s. Should be there in roughly %d minutes — Zone permitting.",
+                                "%s, rolling out. %s to %s, hauling %s. ETA around %d minutes. Keep the channel clear.",
+                                "This is %s. Leaving %s now en route to %s with a full load of %s. See you in about %d minutes.",
+                            },
+                            dolg = {
+                                "%s reporting. Tactical convoy departing %s for %s. Manifest: %s. Arrival in approximately %d minutes. Duty moves.",
+                                "Column leader %s. We roll from %s to %s. Cargo: %s. ETA %d minutes. Stay sharp out there.",
+                                "%s, convoy command. Departing %s for %s with %s. %d-minute estimate. Duty never sleeps.",
+                            },
+                            ecolog = {
+                                "%s, field liaison. Convoy departing %s en route to %s with %s. ETA approximately %d minutes.",
+                                "Institute convoy led by %s is underway from %s en route to %s. Cargo: %s. ETA %d minutes.",
+                            },
+                            killer = {
+                                "%s. Package moving from %s to %s. Contents: %s. ETA %d minutes. Don't ask questions.",
+                                "%s here. Shipment is rolling. %s to %s, carrying %s. %d minutes. Keep comms clean.",
+                            },
+                            bandit = {
+                                "Ey, %s here! We're hauling outta %s, heading to %s with a stack of %s. Should roll in about %d minutes — if no one messes with us.",
+                                "%s on the line. Boys are moving from %s to %s. Got %s loaded up. %d minutes, give or take. Don't try anything stupid.",
+                            },
+                            freedom = {
+                                "%s, rolling free! Heading from %s to %s with %s aboard. Should be there in about %d minutes, brother. Zone's open — let's use it.",
+                                "Freedom convoy, %s speaking. We're leaving %s, bound for %s. %s on board. %d minutes roughly. Stay free.",
+                            },
+                            csky = {
+                                "%s, Clear Sky convoy lead. Departing %s for %s. Cargo: %s. Estimated arrival in %d minutes.",
+                                "Clear Sky field team — %s here. Moving from %s to %s with %s. ETA: %d minutes. Zone activity monitored.",
+                            },
+                        }
+                        local d_phrases = DEPARTURE_PHRASES[route.faction] or {
+                            "%s departing %s for %s with %s. ETA %d minutes."
+                        }
+                        local d_phrase = d_phrases[math.random(#d_phrases)]
+                        local dep_msg = string.format(d_phrase, cmdr_name, src_disp, dest_disp, route.cargo_name, total_min)
+
+                        local sender = { caption = cmdr_name, texture = "ui_iconsTotal_grouping" }
+                        if db.actor and news_manager then
+                            if game_relations and game_relations.is_factions_enemies then
+                                local actor_comm = db.actor:character_community()
+                                if actor_comm and not game_relations.is_factions_enemies(actor_comm, route.faction) then
+                                    news_manager.send_tip(db.actor, dep_msg, nil, sender, nil, nil, true)
+                                end
+                            else
+                                news_manager.send_tip(db.actor, dep_msg, nil, sender, nil, nil, true)
+                            end
+                        end
+                    end
+                end
+            end
+            
+        else
+            -- Active caravan — check if still alive
+            local se_squad = alife_object(squad_id)
+            if not se_squad then
+                -- Wiped out en route
+                active_caravan_ids[i]       = 0
+                active_caravan_deadline[i]  = 0
+                active_caravan_waypoint[i]  = 2
+                active_caravan_npc_count[i] = 0
+                on_caravan_destroyed(i, route)
+            else
+                -- ==== CASUALTY DETECTION — distress call ====
+                local cur_count = 0
+                for _ in pairs(se_squad.npc_info or {}) do cur_count = cur_count + 1 end
+                
+                local prev_count = active_caravan_npc_count[i]
+                if prev_count > 0 and cur_count < prev_count then
+                    -- Someone was killed — commander broadcasts distress call
+                    local loc = get_location_near(se_squad.position)
+                    
+                    -- Try to get the commander's character name
+                    local cmdr_name = route.name  -- fallback
+                    pcall(function()
+                        local cmdr_id = se_squad:commander_id()
+                        local cmdr_se = cmdr_id and alife_object(cmdr_id)
+                        if cmdr_se then
+                            local n = cmdr_se:character_name()
+                            if n and n ~= "" then cmdr_name = n end
+                        end
+                    end)
+                    
+                    local phrase = DISTRESS_PHRASES[math.random(#DISTRESS_PHRASES)]
+                    local msg    = string.format(phrase, cmdr_name, loc)
+                    
+                    -- Distress call goes to ALL friendly players (no faction filter — it's a radio broadcast)
+                    if db.actor and news_manager then
+                        local sender = { caption = "DISTRESS CALL", texture = "ui_iconsTotal_radiation" }
+                        news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                        pcall(dispatch_distress_responders, se_squad)
+                    end
+                end
+                active_caravan_npc_count[i] = cur_count
+                
+                -- ==== WAYPOINT PROGRESSION (silent) ====
+                if tg >= (active_caravan_deadline[i] or 0) then
+                    local wp_idx = active_caravan_waypoint[i]
+                    
+                    if wp_idx >= #route.waypoints then
+                        -- All waypoints done — final destination reached
+                        active_caravan_ids[i]       = 0
+                        active_caravan_deadline[i]  = 0
+                        active_caravan_waypoint[i]  = 2
+                        active_caravan_npc_count[i] = 0
+                        on_caravan_arrived(i, route)
+                        pcall(function() SIMBOARD:remove_squad(se_squad) end)
+                    else
+                        -- Silent advance to next waypoint
+                        local next_wp = route.waypoints[wp_idx + 1]
+                        se_squad.scripted_target   = next_wp
+                        active_caravan_waypoint[i] = wp_idx + 1
+                        active_caravan_deadline[i] = tg + route.segment_time_ms
+                    end
+                end
+                -- else: mid-segment, squad alive — nothing to do
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- MONKEY-PATCHING: trade_manager PRICE DYNAMIC SCALING
+-- ============================================================
+
+local orig_get_buy_discount = nil
+local orig_get_sell_discount = nil
+
+local function patch_trade_manager()
+    if not trade_manager then return end
+    
+    if not orig_get_buy_discount then
+        orig_get_buy_discount = trade_manager.get_buy_discount
+        trade_manager.get_buy_discount = function(npc_id)
+            local base = orig_get_buy_discount(npc_id) or 1.0
+            local npc = level.object_by_id(npc_id)
+            if npc then
+                local ln = level.name()
+                local eco = ln and level_economy[ln]
+                if eco then
+                    -- Trader Buy: what trader pays to buy from the player.
+                    -- Scale DOWN what trader pays if level has shortages/inflation.
+                    local mod = 1.0 / eco.price_multiplier
+                    return base * mod
+                end
+            end
+            return base
+        end
+    end
+    
+    if not orig_get_sell_discount then
+        orig_get_sell_discount = trade_manager.get_sell_discount
+        trade_manager.get_sell_discount = function(npc_id)
+            local base = orig_get_sell_discount(npc_id) or 1.0
+            local npc = level.object_by_id(npc_id)
+            if npc then
+                local ln = level.name()
+                local eco = ln and level_economy[ln]
+                if eco then
+                    -- Trader Sell: what player pays to buy from the trader.
+                    -- Scale UP what player pays during shortages/inflation.
+                    return base * eco.price_multiplier
+                end
+            end
+            return base
+        end
+    end
+end
+
+-- ============================================================
+-- PHYSICAL INVENTORY STOCK MANAGEMENT (Shortages & Refreshes)
+-- ============================================================
+
+local function on_gui_show(gui_name)
+    if gui_name ~= "UITrade" and gui_name ~= "Trade" and gui_name ~= "Dialog" then return end
+    
+    local npc = mob_trade and mob_trade.GetTalkingNpc()
+    if not npc or npc:character_community() ~= "trader" then return end
+    
+    local ln = level.name()
+    local eco = ln and level_economy[ln]
+    if not eco then return end
+    
+    -- A) Shortage physical sweep: Delete scarce categories
+    if eco.shortage_type > 0 then
+        npc:iterate_inventory(function(owner, item)
+            local sec = item:section()
+            local should_purge = false
+            
+            if eco.shortage_type == 1 or eco.shortage_type == 3 then
+                -- Delete ammunition
+                if string.find(sec, "^ammo_") then
+                    should_purge = true
+                end
+            end
+            
+            if eco.shortage_type == 2 or eco.shortage_type == 3 then
+                -- Delete medkits & bandages
+                if sec == "medkit" or sec == "medkit_army" or sec == "medkit_scientic" or sec == "bandage" then
+                    should_purge = true
+                end
+            end
+            
+            if should_purge then
+                local se_obj = alife_object(item:id())
+                if se_obj then
+                    pcall(function()
+                        alife():release(se_obj, true)
+                    end)
+                end
+            end
+        end, npc)
+    end
+    
+    -- B) Arrival physical inject: Spawn premium stock once
+    if eco.refreshed_stock_pending then
+        eco.refreshed_stock_pending = false
+        
+        local premium_spawns = {
+            "medkit_army", "medkit_army",
+            "ammo_5.45x39_ap", "ammo_5.45x39_ap",
+            "ammo_5.56x45_ap", "ammo_5.56x45_ap",
+            "af_cristall_flower" -- rare artifact
+        }
+        
+        local pos = npc:position()
+        local lv = npc:level_vertex_id()
+        local gv = npc:game_vertex_id()
+        local npc_id = npc:id()
+        
+        for _, sec in ipairs(premium_spawns) do
+            pcall(function()
+                alife():create(sec, pos, lv, gv, npc_id)
+            end)
+        end
+    end
+end
+
+-- ============================================================
+-- GRASSROOTS CLOSED-LOOP NPC TRADE SIMULATION
+-- ============================================================
+
+local function get_default_section(cat)
+    return ESSENTIAL_ITEMS[cat][1]
+end
+
+local function scan_npc_inventory(npc)
+    local counts = { heal = 0, bandage = 0, food = 0, drink = 0, medicine = 0, cigarette = 0 }
+    -- Track all excess items per category to sell off
+    local excess_items = { heal = {}, bandage = {}, food = {}, drink = {}, medicine = {}, cigarette = {} }
+    local sellable_loot = {}
+
+    npc:iterate_inventory(function(owner, item)
+        local sec = item:section()
+        local is_essential = false
+
+        for cat, list in pairs(ESSENTIAL_ITEMS) do
+            for _, s in ipairs(list) do
+                if sec == s then
+                    is_essential = true
+                    counts[cat] = (counts[cat] or 0) + 1
+                    -- If already have 1, this is excess — mark for selling
+                    if counts[cat] > 1 then
+                        table.insert(excess_items[cat], item)
+                    end
+                    break
+                end
+            end
+            if is_essential then break end
+        end
+
+        if not is_essential then
+            -- Collect monster parts, weapon scrap, secondary firearms to sell
+            if string.find(sec, "^mutant_part_") or string.find(sec, "^part_") or string.find(sec, "^wpn_") or string.find(sec, "^itm_") then
+                table.insert(sellable_loot, item)
+            end
+        end
+    end, npc)
+
+    return counts, sellable_loot, excess_items
+end
+
+local function get_nearest_trader(npc)
+    local pos = npc:position()
+    local nearest = nil
+    local min_dist = 50 -- within 50 metres
+    
+    for id, st in pairs(db.storage) do
+        local obj = level.object_by_id(id)
+        if obj and IsStalker(obj) and obj:alive() and obj:character_community() == "trader" then
+            local dist = pos:distance_to(obj:position())
+            if dist < min_dist then
+                min_dist = dist
+                nearest = obj
+            end
+        end
+    end
+    return nearest
+end
+
+local function run_npc_grassroots_trade()
+    if not IIsHost() then return end
+    
+    local stalkers = {}
+    for id, st in pairs(db.storage) do
+        local obj = level.object_by_id(id)
+        if obj and IsStalker(obj) and obj:alive() and id ~= AC_ID and obj:character_community() ~= "trader" then
+            table.insert(stalkers, obj)
+        end
+    end
+    
+    if #stalkers == 0 then return end
+    
+    -- Process a small, randomized subset of stalkers each tick to preserve CPU cycles
+    local count = math.min(3, #stalkers)
+    for k = 1, count do
+        local npc = stalkers[math.random(#stalkers)]
+        local npc_name = npc:character_name() or "Stalker"
+        local counts, loot = scan_npc_inventory(npc)
+        local trader = get_nearest_trader(npc)
+        
+        -- A) Scavenger/Loot Selling loop: Sell trophies to Trader to earn Rubles
+        if trader and #loot > 0 then
+            local total_earned = 0
+            
+            -- Apply personality weight: Scavengers and Merchants are much more active
+            local personality = load_var(npc, "alife_personality") or "Survivor"
+            local sell_chance = 40
+            if personality == "Scavenger" or personality == "Merchant" then
+                sell_chance = 85
+            end
+            
+            if math.random(100) <= sell_chance then
+                for _, item in ipairs(loot) do
+                    local sec = item:section()
+                    local cost = system_ini():r_float(sec, "cost") or 200
+                    
+                    local ln = level.name()
+                    local eco = ln and level_economy[ln]
+                    local multiplier = eco and (1.0 / eco.price_multiplier) or 1.0
+                    local price = math.floor(cost * 0.25 * multiplier) -- sell loot at 25% value scaled
+                    
+                    pcall(function()
+                        npc:transfer_item(item, trader)
+                        npc:give_money(price)
+                        total_earned = total_earned + price
+                    end)
+                end
+            end
+        end
+        
+        -- Re-scan inventory post-sales to get actual survival counts
+        counts, loot, excess_items = scan_npc_inventory(npc)
+
+        -- A2) Excess essential item sell-off: keep exactly 1 per category
+        if trader then
+            for cat, items_list in pairs(excess_items) do
+                for _, item_obj in ipairs(items_list) do
+                    local sec = item_obj:section()
+                    local cost = system_ini():r_float(sec, "cost") or 150
+                    local price = math.floor(cost * 0.4) -- sell excess at 40%
+                    pcall(function()
+                        npc:transfer_item(item_obj, trader)
+                        npc:give_money(price)
+                    end)
+                end
+            end
+            -- Re-scan after excess sell
+            counts, loot, excess_items = scan_npc_inventory(npc)
+        end
+        
+        -- B) Survival Purchase loop: Buy necessities from base Trader using earned Rubles
+        if trader then
+            for cat, cnt in pairs(counts) do
+                if cnt == 0 then
+                    local buy_sec = get_default_section(cat)
+                    local trader_item = nil
+                    
+                    trader:iterate_inventory(function(owner, item)
+                        if item:section() == buy_sec then
+                            trader_item = item
+                        end
+                    end, trader)
+                    
+                    if trader_item then
+                        local cost = system_ini():r_float(buy_sec, "cost") or 300
+                        local ln = level.name()
+                        local eco = ln and level_economy[ln]
+                        local multiplier = eco and eco.price_multiplier or 1.0
+                        local final_price = math.floor(cost * multiplier)
+                        
+                        if npc:money() >= final_price then
+                            pcall(function()
+                                trader:transfer_item(trader_item, npc)
+                                npc:give_money(-final_price)
+                                trader:give_money(final_price)
+                            end)
+                            
+                            -- Verify if this was the last item of this section in trader inventory
+                            local has_more = false
+                            trader:iterate_inventory(function(owner, item)
+                                if item:section() == buy_sec then
+                                    has_more = true
+                                end
+                            end, trader)
+                            
+                            -- Fire "last item" alert only — NPC speaks in character to the radio channel
+                            if not has_more and npc:relation(db.actor) ~= game_object.enemy then
+                                local tr_name = trader:character_name() or "Trader"
+                                local item_disp = game.translate_string(buy_sec)
+                                local loc_name = get_location_near(npc:position())
+                                
+                                local phrases = {
+                                    "Heads up — just bought the last %s from %s here in %s. Nothing left.",
+                                    "FYI guys, %s at %s in %s is completely out of %s. Don't bother.",
+                                    "Yo, grabbed the last %s off %s in %s. Stock's gone.",
+                                    "Worth knowing — %s ran dry on %s over in %s.",
+                                    "Just cleaned out %s's last %s in %s. Supply's done.",
+                                }
+                                local msg
+                                local idx = math.random(#phrases)
+                                if idx == 2 then
+                                    -- special order: item, trader, location
+                                    msg = string.format(phrases[idx], item_disp, tr_name, loc_name, item_disp)
+                                else
+                                    msg = string.format(phrases[idx], item_disp, tr_name, loc_name)
+                                end
+                                
+                                local sender = {
+                                    caption = npc_name,
+                                    texture = npc:character_icon() or "ui_iconsTotal_grouping",
+                                }
+                                CreateTimeEvent(0, "npc_last_buy_" .. npc:id() .. "_" .. time_global(), math.random(1, 3), function()
+                                    news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                                    return true
+                                end)
+                            end
+                            break -- buy one item type per cycle
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- C) Campfire peer-to-peer barter (if far from traders)
+        if not trader then
+            local peers = {}
+            local pos = npc:position()
+            for id, st in pairs(db.storage) do
+                local obj = level.object_by_id(id)
+                if obj and IsStalker(obj) and obj:alive() and id ~= AC_ID and id ~= npc:id() and obj:character_community() ~= "trader" then
+                    if npc:relation(obj) ~= game_object.enemy then
+                        local dist = pos:distance_to(obj:position())
+                        if dist < 12 then -- campfire range
+                            table.insert(peers, obj)
+                        end
+                    end
+                end
+            end
+            
+            if #peers > 0 then
+                for cat, cnt in pairs(counts) do
+                    if cnt == 0 then
+                        for _, peer in ipairs(peers) do
+                            local p_counts, p_loot, p_excess = scan_npc_inventory(peer)
+                            if (p_counts[cat] or 0) > 1 then
+                                local trade_sec = get_default_section(cat)
+                                local item_obj = nil
+                                
+                                peer:iterate_inventory(function(owner, item)
+                                    if item:section() == trade_sec then
+                                        item_obj = item
+                                    end
+                                end, peer)
+                                
+                                if item_obj then
+                                    local cost = system_ini():r_float(trade_sec, "cost") or 300
+                                    local price = math.floor(cost * 0.85) -- peer trade at 85% cost
+                                    
+                                    if npc:money() >= price then
+                                        pcall(function()
+                                            peer:transfer_item(item_obj, npc)
+                                            npc:give_money(-price)
+                                            peer:give_money(price)
+                                        end)
+                                        
+                                        -- (no ambient message for peer barter — silent transaction)
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- MODULE REGISTER & CALLBACKS
+-- ============================================================
+
+local last_trade_time  = 0
+local last_hazard_time = 0
+local TRADE_COOLDOWN   = 12000  -- 12 s: caravans + grassroots trade
+local HAZARD_COOLDOWN  = 3000   --  3 s: radiation / anomaly / item-use simulation
+
+local function on_actor_update()
+    if not IIsHost() then return end
+    local tg = time_global()
+
+    -- Economy & trade tick (slow)
+    if tg > last_trade_time + TRADE_COOLDOWN then
+        last_trade_time = tg
+        update_caravans()
+        run_npc_grassroots_trade()
+    end
+
+    -- Hazard simulation tick (fast — radiation, anomalies, item use)
+    if tg > last_hazard_time + HAZARD_COOLDOWN then
+        last_hazard_time = tg
+        run_npc_hazard_simulation()
+    end
+end
+
+function on_game_start()
+    if _G.M_SUPPLY_CARAVANS_REGISTERED then return end
+    _G.M_SUPPLY_CARAVANS_REGISTERED = true
+    
+    RegisterScriptCallback("actor_on_update",  on_actor_update)
+    RegisterScriptCallback("actor_on_save",    actor_on_save)
+    RegisterScriptCallback("actor_on_load",    actor_on_load)
+    RegisterScriptCallback("GUI_on_show",      on_gui_show)
+    
+    -- Intercept trade manager calculations
+    patch_trade_manager()
+end

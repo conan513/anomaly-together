@@ -311,6 +311,12 @@ local function do_rescue(npc_id, entry)
 
     -- Snapshot everything needed for the async closures NOW (NPC may go offline)
     local faction      = entry.faction
+    if game_relations and game_relations.is_factions_enemies then
+        local actor_comm = db.actor:character_community()
+        if actor_comm and game_relations.is_factions_enemies(actor_comm, faction) then
+            return
+        end
+    end
     local npc_name     = entry.name
     local npc_icon     = entry.icon
     local rescue_pos   = entry.pos          -- already a copy_vec
@@ -402,6 +408,12 @@ local function deferred_rescue(npc, npc_id)
     recently_thanked[npc_id] = tg
 
     local faction      = npc:character_community() or "stalker"
+    if game_relations and game_relations.is_factions_enemies then
+        local actor_comm = db.actor:character_community()
+        if actor_comm and game_relations.is_factions_enemies(actor_comm, faction) then
+            return
+        end
+    end
     local npc_name     = npc:character_name()      or "Unknown Stalker"
     local npc_icon     = npc:character_icon()      or "ui_iconsTotal_grouping"
     local pos_snap     = copy_vec(npc:position())
