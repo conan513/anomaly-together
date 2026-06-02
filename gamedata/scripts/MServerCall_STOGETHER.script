@@ -79,6 +79,57 @@ function IsUsedStorage(npc)
         end
         log("! [SERVER] PROCESSING INVENTORY->CORPSE STORAGE!")
         death_manager.create_release_item(npc)
+
+        -- Actual money looting implementation
+        local victim_money = npc:money()
+        if victim_money and victim_money > 0 and not se_load_var(npc:id(), npc:name(), "corpse_money_looted") then
+            -- Find the closest player to this corpse
+            local closest_player = nil
+            local min_dist = 4.0 -- must be within 4 meters to search
+            
+            -- Check host actor
+            if db.actor and db.actor:alive() then
+                local dist = npc:position():distance_to(db.actor:position())
+                if dist < min_dist then
+                    min_dist = dist
+                    closest_player = db.actor
+                end
+            end
+            
+            -- Check other players on the server
+            for id, obj in pairs(db.storage) do
+                local char = level.object_by_id(id)
+                if char and IsStalker(char) and IsActor(char) and char:alive() and id ~= db.actor:id() then
+                    local dist = npc:position():distance_to(char:position())
+                    if dist < min_dist then
+                        min_dist = dist
+                        closest_player = char
+                    end
+                end
+            end
+            
+            if closest_player then
+                -- Give money to the closest player
+                if closest_player:id() == db.actor:id() then
+                    db.actor:give_money(victim_money)
+                    news_manager.relocate_money(db.actor, "in", victim_money)
+                else
+                    local client_netid = closest_player.GetNetID and closest_player:GetNetID()
+                    if client_netid then
+                        local cmd = string.format("db.actor:give_money(%d); news_manager.relocate_money(db.actor, 'in', %d)", victim_money, victim_money)
+                        GameManager:OnICustomScriptAction(cmd, false, client_netid)
+                    end
+                end
+                
+                -- Set the corpse's money to 0 and sync it to all clients
+                npc:give_money(-victim_money)
+                local cmd_sync = string.format("local c = level.object_by_id(%d); if c then c:give_money(-c:money()) end; se_save_var(%d, nil, 'corpse_money_looted', true)", npc:id(), npc:id())
+                GameManager:OnICustomScriptAction(cmd_sync, false)
+                
+                se_save_var(npc:id(), npc:name(), "corpse_money_looted", true)
+            end
+        end
+
         return not se_load_var(npc:id(), npc:name(), "death_dropped")
     elseif IsInvbox(npc) then
         local loot_dropped = se_load_var(npc:id(), npc:name(), "loot_dropped")

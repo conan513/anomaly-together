@@ -1190,6 +1190,23 @@ local function npc_on_death_callback(victim, killer)
     if not IIsHost() then return end
     if not victim or not killer then return end
     
+    -- NPC loots money from victim NPC
+    if IsStalker(killer) and killer:alive() and not IsActor(killer) then
+        local victim_money = victim:money()
+        if victim_money and victim_money > 0 then
+            killer:give_money(victim_money)
+            victim:give_money(-victim_money)
+            
+            -- Sync the money change to all clients
+            local cmd = string.format("local vic = level.object_by_id(%d); local kil = level.object_by_id(%d); if vic and kil then vic:give_money(-vic:money()); kil:give_money(%d) end", victim:id(), killer:id(), victim_money)
+            if SteamGameManager then
+                SteamGameManager():OnICustomScriptAction(cmd, false)
+            end
+            
+            se_save_var(victim:id(), victim:name(), "corpse_money_looted", true)
+        end
+    end
+
     if IsStalker(killer) and killer:alive() and killer:id() ~= AC_ID then
         local personality = load_var(killer, "alife_personality")
         if not personality then
@@ -1262,6 +1279,12 @@ end
 
 local function npc_on_net_spawn(npc)
     init_npc(npc)
+    if not npc:alive() and se_load_var(npc:id(), npc:name(), "corpse_money_looted") then
+        local m = npc:money()
+        if m and m > 0 then
+            npc:give_money(-m)
+        end
+    end
 end
 
 function on_game_start()
