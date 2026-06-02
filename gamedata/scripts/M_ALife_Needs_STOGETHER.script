@@ -30,6 +30,21 @@ local BASE_SMARTS = {
     red_forest     = "red_smart_terrain_6_3",   -- Forester Lodge
 }
 
+-- Faction -> preferred trade smarts (where their traders live)
+-- NPC-k eladnak lootot ha odaernek
+local FACTION_TRADE_SMARTS = {
+    stalker  = { "esc_smart_terrain_2_12", "gar_smart_terrain_3_5", "bar_dolg_general", "jup_a6", "zat_stalker_base_smart" },
+    dolg     = { "bar_dolg_general", "jup_a6" },
+    freedom  = { "val_smart_terrain_8_6", "jup_a6" },
+    bandit   = { "val_smart_terrain_8_6", "zat_stalker_base_smart" },
+    killer   = { "gar_smart_terrain_3_5", "cit_smart_terrain_3_5" },
+    csky     = { "mar_smart_terrain_base" },
+    ecolog   = { "yan_smart_terrain_6_4", "jup_a6" },
+    army     = { "mil_smart_terrain_7_7" },
+    monolith = {},
+    zombie   = {},
+}
+
 local FOOD_ITEMS = { "bread", "kolbasa", "conserva", "tushonka" }
 local DRINK_ITEMS = { "water_drink", "energy_drink", "vodka" }
 local ARTIFACT_LIST = { "af_cristall_flower", "af_blood", "af_medusa", "af_vyvert", "af_fireball", "af_electra_sparkler" }
@@ -802,6 +817,129 @@ local function update_player_bounties()
     return true
 end
 
+-- 6. Loot Seller: wandering sim_squad NPCs with trophies/loot travel to their
+-- faction's nearest trade base to sell. Runs every 5 minutes, 25% trigger chance.
+local function npc_has_sellable_loot(npc)
+    local found = false
+    npc:iterate_inventory(function(owner, item)
+        if found then return end
+        local sec = item:section()
+        if string.find(sec, "^mutant_part_") or string.find(sec, "^part_") or
+           string.find(sec, "^wpn_") or string.find(sec, "^itm_") then
+            found = true
+        end
+    end, npc)
+    return found
+end
+
+local function update_loot_sellers()
+    if not IIsHost() then return true end
+    if not db.actor then return true end
+
+    local sim = alife()
+    local gg  = game_graph()
+
+    for squad_id, _ in pairs(SIMBOARD.squads) do
+        local squad = sim:object(squad_id)
+        if squad and squad:npc_count() > 0 then
+
+            -- Only sim_squad sections (movement involved)
+            local is_sim = (squad.player_id ~= "trader") and (get_object_story_id(squad.id) == nil)
+            if is_sim then
+                local sec = squad:section_name()
+                if sec and not (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                    is_sim = false
+                end
+            end
+            if not is_sim then
+            elseif se_load_var(squad.id, nil, "distress_target") then
+                -- already busy, skip
+            elseif squad.scripted_target and squad.scripted_target ~= "" then
+                -- already heading somewhere, skip
+            elseif squad.get_script_target and squad:get_script_target() then
+                -- quest scripted, skip
+            else
+                local cmdr_id  = squad:commander_id()
+                local cmdr_obj = level.object_by_id(cmdr_id)
+
+                if cmdr_obj and cmdr_obj:alive()
+                   and cmdr_obj:character_community() ~= "trader"
+                   and get_object_story_id(cmdr_id) == nil
+                   and npc_has_sellable_loot(cmdr_obj) then
+
+                    -- Check if a trader is already within 60m
+                    local has_trader_nearby = false
+                    for id, _ in pairs(db.storage) do
+                        local t = level.object_by_id(id)
+                        if t and IsStalker(t) and t:alive() and t:character_community() == "trader" then
+                            if cmdr_obj:position():distance_to(t:position()) < 60 then
+                                has_trader_nearby = true
+                                break
+                            end
+                        end
+                    end
+
+                    if not has_trader_nearby and math.random(100) <= 25 then
+                        -- Find faction's preferred trade base on the same level
+                        local faction      = squad.player_id
+                        local trade_list   = FACTION_TRADE_SMARTS[faction]
+                        local squad_level  = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
+
+                        local best_smart = nil
+                        local best_dist  = 99999
+
+                        if trade_list then
+                            for _, smart_name in ipairs(trade_list) do
+                                local smart = SIMBOARD.smarts_by_names[smart_name]
+                                if smart and smart.position and smart.m_game_vertex_id then
+                                    local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
+                                    if sl == squad_level then
+                                        local d = squad.position:distance_to(smart.position)
+                                        if d < best_dist and d > 60 then
+                                            best_dist  = d
+                                            best_smart = smart
+                                        end
+                                    end
+                                end
+                            end
+                        end
+
+                        if best_smart then
+                            squad.scripted_target = best_smart:name()
+                            se_save_var(squad.id, nil, "distress_target", best_smart:name())
+                            se_save_var(squad.id, nil, "distress_time", time_global())
+
+                            -- 35% chance to broadcast the trip over PDA
+                            if math.random(100) <= 35 and news_manager then
+                                local cmdr_name = cmdr_obj:character_name() or "Stalker"
+                                local loc = get_location_near(best_smart.position)
+                                local phrases = {
+                                    "Heading to %s to sell off some gear. Pockets are getting heavy.",
+                                    "Got a bag full of trophies. Moving to %s to cash in.",
+                                    "Time to visit the trader at %s. Earned a good haul today.",
+                                    "Dropping off loot at %s. Be back on patrol after.",
+                                }
+                                local msg = string.format(phrases[math.random(#phrases)], loc)
+                                local comm = cmdr_obj:character_community() or ""
+                                local comm_name = (comm ~= "") and game.translate_string(comm) or ""
+                                local caption = cmdr_name
+                                if comm_name ~= "" then caption = caption .. " (" .. comm_name .. ")" end
+                                local sender = { caption = caption, texture = cmdr_obj:character_icon() or "ui_iconsTotal_grouping" }
+                                CreateTimeEvent(0, "loot_seller_radio_" .. squad.id, math.random(1, 3), function()
+                                    news_manager.send_tip(db.actor, msg, nil, sender, nil, nil, true)
+                                    return true
+                                end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return true
+end
+
 function on_game_start()
     -- Fast needs loop (every 25 seconds)
     local function needs_loop()
@@ -834,4 +972,12 @@ function on_game_start()
         return false
     end
     CreateTimeEvent("player_bounty_timer", "update_bounty", 70, bounty_loop)
+
+    -- Loot seller loop (every 5 minutes)
+    local function loot_loop()
+        update_loot_sellers()
+        ResetTimeEvent("loot_sellers_timer", "update_loot", 300)
+        return false
+    end
+    CreateTimeEvent("loot_sellers_timer", "update_loot", 120, loot_loop)
 end
