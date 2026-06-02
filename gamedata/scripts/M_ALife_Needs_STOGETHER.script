@@ -818,14 +818,15 @@ local function update_player_bounties()
 end
 
 -- 6. Loot Seller: wandering sim_squad NPCs with trophies/loot travel to their
--- faction's nearest trade base to sell. Runs every 5 minutes, 25% trigger chance.
+-- faction's nearest trade base to sell. Runs every 60 seconds, 100% trigger chance.
 local function npc_has_sellable_loot(npc)
     local found = false
     npc:iterate_inventory(function(owner, item)
         if found then return end
         local sec = item:section()
         if string.find(sec, "^mutant_part_") or string.find(sec, "^part_") or
-           string.find(sec, "^wpn_") or string.find(sec, "^itm_") then
+           string.find(sec, "^wpn_") or string.find(sec, "^itm_") or
+           string.find(sec, "^af_") or string.find(sec, "^ammo_") then
             found = true
         end
     end, npc)
@@ -851,6 +852,38 @@ local function update_loot_sellers()
                     is_sim = false
                 end
             end
+            
+            -- Arrived at trader base check: clear target so they can do other tasks
+            if is_sim then
+                local distress_target = se_load_var(squad.id, nil, "distress_target")
+                if distress_target then
+                    local is_trade_smart = false
+                    for faction, list in pairs(FACTION_TRADE_SMARTS) do
+                        for _, sname in ipairs(list) do
+                            if sname == distress_target then
+                                is_trade_smart = true
+                                break
+                            end
+                        end
+                        if is_trade_smart then break end
+                    end
+
+                    if is_trade_smart then
+                        local target_smart = SIMBOARD.smarts_by_names[distress_target]
+                        if target_smart and target_smart.position then
+                            local dist = squad.position:distance_to(target_smart.position)
+                            if dist < 45 then
+                                se_save_var(squad.id, nil, "distress_target", nil)
+                                squad.scripted_target = nil
+                                log(string.format("! [NEEDS] Squad %d arrived at trade smart %s, clearing distress target.", squad.id, target_smart:name()))
+                            end
+                        else
+                            se_save_var(squad.id, nil, "distress_target", nil)
+                        end
+                    end
+                end
+            end
+
             if not is_sim then
             elseif se_load_var(squad.id, nil, "distress_target") then
                 -- already busy, skip
@@ -879,7 +912,7 @@ local function update_loot_sellers()
                         end
                     end
 
-                    if not has_trader_nearby and math.random(100) <= 25 then
+                    if not has_trader_nearby and math.random(100) <= 100 then
                         local faction      = squad.player_id
                         local squad_level  = sim:level_name(gg:vertex(squad.m_game_vertex_id):level_id())
 
@@ -1025,11 +1058,11 @@ function on_game_start()
     end
     CreateTimeEvent("player_bounty_timer", "update_bounty", 70, bounty_loop)
 
-    -- Loot seller loop (every 5 minutes)
+    -- Loot seller loop (every 60 seconds)
     local function loot_loop()
         update_loot_sellers()
-        ResetTimeEvent("loot_sellers_timer", "update_loot", 300)
+        ResetTimeEvent("loot_sellers_timer", "update_loot", 60)
         return false
     end
-    CreateTimeEvent("loot_sellers_timer", "update_loot", 120, loot_loop)
+    CreateTimeEvent("loot_sellers_timer", "update_loot", 20, loot_loop)
 end
