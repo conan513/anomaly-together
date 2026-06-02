@@ -1141,10 +1141,7 @@ local function on_actor_update()
                and get_object_story_id(id) == nil then
                 local squad = get_object_squad(obj)
                 if squad and get_object_story_id(squad.id) == nil then
-                    local sec = squad:section_name()
-                    if sec and (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
-                        table.insert(stalkers, obj)
-                    end
+                    table.insert(stalkers, obj)
                 end
             end
         end
