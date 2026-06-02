@@ -142,8 +142,15 @@ local function run_needs_simulation()
         local obj = level.object_by_id(id)
         if obj and IsStalker(obj) and obj:alive()
            and id ~= AC_ID
-           and obj:character_community() ~= "trader" then
-            table.insert(stalkers, obj)
+           and obj:character_community() ~= "trader"
+           and get_object_story_id(id) == nil then
+            local squad = get_object_squad(obj)
+            if squad and get_object_story_id(squad.id) == nil then
+                local sec = squad:section_name()
+                if sec and (string.find(sec, "sim_squad") or string.find(sec, "simulation") or string.find(sec, "_sim_")) then
+                    table.insert(stalkers, obj)
+                end
+            end
         end
     end
     if #stalkers == 0 then return true end
