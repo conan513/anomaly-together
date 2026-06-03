@@ -93,6 +93,58 @@ local function actor_on_interaction(temp, _, section)
         GameManager:OnICustomAnimation("dinamit_0", "", true, 2)
     end
 end
+
+local prev_armor_id = nil
+local prev_armor_cond = nil
+local prev_helmet_id = nil
+local prev_helmet_cond = nil
+
+local function actor_on_update()
+    if not db.actor then return end
+    
+    -- Slot 7: Armor
+    local armor = db.actor:item_in_slot(7)
+    if armor then
+        local id = armor:id()
+        local cond = armor:condition()
+        if id == prev_armor_id and prev_armor_cond and cond < prev_armor_cond then
+            local diff = prev_armor_cond - cond
+            -- Refund 75% of the degradation to make it degrade 4 times slower
+            local refund = diff * 0.75
+            local new_cond = math.min(1.0, cond + refund)
+            armor:set_condition(new_cond)
+            prev_armor_cond = new_cond
+        else
+            prev_armor_id = id
+            prev_armor_cond = cond
+        end
+    else
+        prev_armor_id = nil
+        prev_armor_cond = nil
+    end
+
+    -- Slot 12: Helmet
+    local helmet = db.actor:item_in_slot(12)
+    if helmet then
+        local id = helmet:id()
+        local cond = helmet:condition()
+        if id == prev_helmet_id and prev_helmet_cond and cond < prev_helmet_cond then
+            local diff = prev_helmet_cond - cond
+            -- Refund 75% of the degradation to make it degrade 4 times slower
+            local refund = diff * 0.75
+            local new_cond = math.min(1.0, cond + refund)
+            helmet:set_condition(new_cond)
+            prev_helmet_cond = new_cond
+        else
+            prev_helmet_id = id
+            prev_helmet_cond = cond
+        end
+    else
+        prev_helmet_id = nil
+        prev_helmet_cond = nil
+    end
+end
+
 function on_game_start()
     -- REPEAT PATCH UNPATCHED PLACE
     MPMain_GamePatches_STOGETHER.Patch()
@@ -111,4 +163,5 @@ function on_game_start()
     RegisterScriptCallback("actor_on_interaction", actor_on_interaction)
     RegisterScriptCallback("actor_on_sleep", actor_on_sleep)
     RegisterScriptCallback("on_option_change", MPMain_STOGETHER.RestoreValues)
+    RegisterScriptCallback("actor_on_update", actor_on_update)
 end

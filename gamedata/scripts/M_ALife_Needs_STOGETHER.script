@@ -125,6 +125,58 @@ local function get_nearest_smart_at_pos(pos)
     return nearest
 end
 
+-- Helper: find the best approach smart for a hunter squad toward a target position.
+-- Prefers the hunter's OWN faction smarts closest to the target, so hunters never
+-- end up navigating directly into the enemy's home base.
+-- Falls back to any non-enemy smart if the hunter has no smarts on this level.
+local function get_approach_smart_for_hunter(hunter_squad, target_pos)
+    if not hunter_squad or not target_pos then return nil end
+
+    local sim  = alife()
+    local gg   = game_graph()
+    local hunter_faction = hunter_squad.player_id
+    local hunter_level   = sim:level_name(gg:vertex(hunter_squad.m_game_vertex_id):level_id())
+
+    local best_own  = nil
+    local best_own_d  = 999999
+    local best_safe = nil
+    local best_safe_d = 999999
+
+    for _, smart in pairs(db.smart_terrain_by_id or {}) do
+        if smart.position and smart.m_game_vertex_id then
+            local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
+            if sl == hunter_level then
+                local d = target_pos:distance_to(smart.position)
+                local smart_faction = smart.player_id or ""
+
+                -- Is this smart controlled by an enemy faction?
+                local is_enemy_smart = false
+                if smart_faction ~= "" and smart_faction ~= hunter_faction then
+                    if game_relations and game_relations.is_factions_enemies then
+                        is_enemy_smart = game_relations.is_factions_enemies(hunter_faction, smart_faction)
+                    end
+                end
+
+                if smart_faction == hunter_faction then
+                    -- Own faction smart: best choice
+                    if d < best_own_d then
+                        best_own_d = d
+                        best_own   = smart
+                    end
+                elseif not is_enemy_smart then
+                    -- Neutral/friendly smart: acceptable fallback
+                    if d < best_safe_d then
+                        best_safe_d = d
+                        best_safe   = smart
+                    end
+                end
+            end
+        end
+    end
+
+    return best_own or best_safe
+end
+
 -- Helper: try to consume the first item matching any of the sections
 local function npc_consume_item(npc, sections)
     local consumed = false
@@ -568,7 +620,8 @@ local function update_night_hunters()
                         if not is_busy and math.random(100) <= 40 then
                             local victim = get_night_hunter_target(squad)
                             if victim then
-                                local nearest_smart = get_nearest_smart_at_pos(victim.position)
+                                -- Use hunter's own-faction approach smart, NOT the enemy's home base
+                                local nearest_smart = get_approach_smart_for_hunter(squad, victim.position)
                                 if nearest_smart then
                                     squad.scripted_target = nearest_smart:name()
                                     se_save_var(squad.id, nil, "distress_target", nearest_smart:name())
@@ -715,7 +768,8 @@ local function update_player_bounties()
                                 end
 
                                 if not is_busy then
-                                    local nearest_smart = get_nearest_smart_at_pos(player_pos)
+                                    -- Use hunter's own-faction approach smart, NOT the player's home base
+                                    local nearest_smart = get_approach_smart_for_hunter(squad, player_pos)
                                     if nearest_smart then
                                         squad.scripted_target = nearest_smart:name()
                                         se_save_var(squad.id, nil, "distress_target", nearest_smart:name())
@@ -940,9 +994,17 @@ local function update_loot_sellers()
                         local friendly_lookup = {}
                         for fac, list in pairs(FACTION_TRADE_SMARTS) do
                             if fac ~= faction then
-                                local is_friendly = true
+                                -- Double guard: must pass faction relations check
+                                local is_friendly = false
                                 if game_relations and game_relations.is_factions_enemies then
                                     is_friendly = not game_relations.is_factions_enemies(faction, fac)
+                                else
+                                    -- If relations API unavailable, be conservative:
+                                    -- only allow traditionally neutral factions
+                                    local neutral_factions = {
+                                        stalker = true, ecolog = true, csky = true
+                                    }
+                                    is_friendly = neutral_factions[fac] == true
                                 end
                                 if is_friendly then
                                     for _, smart_name in ipairs(list) do
@@ -951,8 +1013,18 @@ local function update_loot_sellers()
                                             if smart and smart.position and smart.m_game_vertex_id then
                                                 local sl = sim:level_name(gg:vertex(smart.m_game_vertex_id):level_id())
                                                 if sl == squad_level then
-                                                    table.insert(friendly_smarts, smart)
-                                                    friendly_lookup[smart_name] = true
+                                                    -- Extra safety: verify the smart itself is not flagged as enemy
+                                                    local smart_fac = smart.player_id or ""
+                                                    local smart_is_enemy = false
+                                                    if smart_fac ~= "" and smart_fac ~= faction then
+                                                        if game_relations and game_relations.is_factions_enemies then
+                                                            smart_is_enemy = game_relations.is_factions_enemies(faction, smart_fac)
+                                                        end
+                                                    end
+                                                    if not smart_is_enemy then
+                                                        table.insert(friendly_smarts, smart)
+                                                        friendly_lookup[smart_name] = true
+                                                    end
                                                 end
                                             end
                                         end

@@ -15,10 +15,10 @@
 		<text>[Server] Max players</text>
 	</string>
 	<string id="ui_mcm_werasik2aa_friendly_fire">
-		<text>[Сервер] Friendly fire</text>
+		<text>[Server] Friendly fire</text>
 	</string>
 		<string id="ui_mcm_werasik2aa_transvestit_to_level">
-		<text>[Сервер] Transfer players to another level</text>
+		<text>[Server] Transfer players to another level</text>
 	</string>
 	<string id="ui_mcm_werasik2aa_resurrect_allow">
 		<text>Allow resurrect</text>

@@ -537,6 +537,151 @@ end
 -- Previous health snapshot table used to detect rapid health drops (anomaly hits)
 local npc_prev_hp = {}
 
+-- ============================================================
+-- ANOMALY ZONE CACHE & NPC AVOIDANCE
+-- ============================================================
+-- Section-name substrings that identify hazardous anomaly zones.
+-- Keep this list broad so modded anomaly sections are also caught.
+local ANOM_SECTION_SUBS = {
+    "zone_mbald",   "zone_galant",   "zone_mincer",  "zone_radio",
+    "zone_torrid",  "zone_nograv",   "zone_ameba",   "zone_bfuzz",
+    "zone_acid",    "zone_electric", "zone_thermal", "zone_gravitational",
+    "zone_chemical","zan_",
+}
+
+local function _is_anom_section(sec)
+    if not sec then return false end
+    for _, pat in ipairs(ANOM_SECTION_SUBS) do
+        if string.find(sec, pat, 1, true) then return true end
+    end
+    return false
+end
+
+-- Cache: list of { pos=vector, zone=game_object } for anomaly zones near the player.
+-- Rebuilt every ANOM_CACHE_TTL ms (zones are static but appear/vanish as player moves).
+local _anom_zone_cache = nil
+local _anom_cache_stamp = 0
+local ANOM_CACHE_TTL   = 15000  -- rebuild every 15 seconds
+
+local function _get_anom_zones()
+    local now = time_global()
+    if _anom_zone_cache and (now - _anom_cache_stamp) < ANOM_CACHE_TTL then
+        return _anom_zone_cache
+    end
+    _anom_zone_cache = {}
+    for _, zone_obj in pairs(db.zone_by_name or {}) do
+        if zone_obj then
+            local ok_sec, sec = pcall(function() return zone_obj:section() end)
+            if ok_sec and _is_anom_section(sec) then
+                local ok_pos, pos = pcall(function() return zone_obj:position() end)
+                if ok_pos and pos then
+                    table.insert(_anom_zone_cache, { pos = pos, zone = zone_obj, sec = sec })
+                end
+            end
+        end
+    end
+    _anom_cache_stamp = now
+    return _anom_zone_cache
+end
+
+-- Proactive avoidance distance from zone centre.
+-- Most STALKER anomaly zones are 3-8 m radius; 13 m gives a comfortable approach buffer.
+local ANOM_AVOID_DIST = 13.0
+
+-- Returns: inside_entry (cache table or nil), near_zone (bool)
+-- inside_entry → non-nil: NPC is inside that zone entry (.zone, .pos, .sec)
+-- near_zone    → NPC centre is within ANOM_AVOID_DIST of a zone but not yet inside
+local function npc_anomaly_status(npc)
+    local zones = _get_anom_zones()
+    if #zones == 0 then return nil, false end
+    local npc_pos      = npc:position()
+    local inside_entry = nil
+    local near         = false
+    for _, entry in ipairs(zones) do
+        -- Accurate engine geometry containment check
+        local ok_in, in_zone = pcall(function() return entry.zone:inside(npc_pos) end)
+        if ok_in and in_zone then
+            inside_entry = entry
+            break  -- no need to check further
+        end
+        -- Distance-to-centre for proactive approach steering
+        local ok_d, dist = pcall(function() return npc_pos:distance_to(entry.pos) end)
+        if ok_d and dist < ANOM_AVOID_DIST then
+            near = true
+        end
+    end
+    return inside_entry, near
+end
+
+-- Hit type constants mapped from anomaly section name patterns.
+-- Values match the hit.* enum: burn=0, strike=1, shock=2, radiation=4, chemical_burn=7, light_burn=8
+local ANOM_HIT_TYPES = {
+    { pat = "mbald",          htype = 2 },  -- Electra / Mosquito Bald (electric)
+    { pat = "bfuzz",          htype = 2 },  -- Burnt Fuzz (electric)
+    { pat = "electric",       htype = 2 },
+    { pat = "torrid",         htype = 0 },  -- Torrid Zone (fire)
+    { pat = "thermal",        htype = 0 },
+    { pat = "galant",         htype = 1 },  -- Springboard (gravitational strike)
+    { pat = "mincer",         htype = 1 },  -- Mincer (gravitational)
+    { pat = "gravitational",  htype = 1 },
+    { pat = "radio",          htype = 4 },  -- Radioactive zone
+    { pat = "ameba",          htype = 7 },  -- Ameba (chemical)
+    { pat = "chemical",       htype = 7 },
+    { pat = "acid",           htype = 7 },
+    { pat = "nograv",         htype = 8 },  -- No-Gravity zone
+}
+
+local function _get_anom_hit_type(sec)
+    for _, row in ipairs(ANOM_HIT_TYPES) do
+        if string.find(sec, row.pat, 1, true) then return row.htype end
+    end
+    return 8  -- hit.light_burn as safe default
+end
+
+-- Apply the full anomaly zone hit to an NPC:
+--  1. hit() object  → NPC flinch animation + wound sound + damage
+--  2. particles_object → zone's own particle burst at NPC position
+--  3. sound_object  → zone's hit/activation sound (3D, heard by local player)
+-- Particle and sound names are read from system_ini so modded zones are supported.
+local function apply_anomaly_zone_hit(npc, entry)
+    if not (npc and npc:alive() and entry) then return end
+    local sec     = entry.sec or ""
+    local hit_pos = npc:position()
+    local ini     = system_ini()
+
+    -- 1. Scripted hit → NPC flinch/wound animation + proper damage
+    pcall(function()
+        local h     = hit()
+        h.type      = _get_anom_hit_type(sec)
+        h.power     = 0.10            -- 10% damage per 3s tick; enough to wound and flinch
+        h.impulse   = 20              -- small impulse → subtle stagger
+        h.direction = vector():set(0, -1, 0)
+        h.draftsman = npc             -- self-attributed (zone hit, no aggression blame)
+        npc:hit(h)
+    end)
+
+    -- 2. Particle burst at hit position (read from zone section in system.ltx)
+    pcall(function()
+        local pname = ini:r_string_ex(sec, "hit_particle")
+                   or ini:r_string_ex(sec, "idle_particle")
+        if pname and pname ~= "" then
+            local p = particles_object(pname)
+            p:play_at_pos(hit_pos)
+        end
+    end)
+
+    -- 3. 3D positional sound at hit position
+    pcall(function()
+        local sname = ini:r_string_ex(sec, "hit_sound")
+                   or ini:r_string_ex(sec, "idle_sound_0")
+                   or ini:r_string_ex(sec, "idle_sound")
+        if sname and sname ~= "" and db.actor then
+            local snd = sound_object(sname)
+            snd:play_at_pos(db.actor, hit_pos, 0, sound_object.s3d)
+        end
+    end)
+end
+
 -- Main hazard update: radiation damage, antirad/cigarette use, anomaly flee
 local function run_npc_hazard_simulation()
     if not IIsHost() then return end
@@ -599,14 +744,29 @@ local function run_npc_hazard_simulation()
             end
         end)
 
-        -- ==== ANOMALY ZONE DETECTION (rapid health loss without radiation) ====
+        -- ==== ANOMALY ZONE AVOIDANCE & TRIGGERING ====
+        -- Two-tier: proactive steering when approaching + full zone hit when inside.
+        -- NPCs don't trigger anomaly zones in the engine (only monsters do), so we
+        -- fire hit() (flinch anim + damage), particles_object and sound_object manually.
+        local inside_entry, near_anom = npc_anomaly_status(npc)
+        if inside_entry then
+            -- NPC is inside the zone: full hit effect (visual + sound + damage) + flee
+            flee_squad_to_nearest_safe(npc)
+            apply_anomaly_zone_hit(npc, inside_entry)
+            if hp < 0.35 then
+                npc_use_item_section(npc, { "medkit_army", "medkit", "medkit_scientic" })
+            end
+        elseif near_anom then
+            -- NPC is approaching the zone boundary: steer away before entering
+            flee_squad_to_nearest_safe(npc)
+        end
+
+        -- ==== ANOMALY FALLBACK (rapid health loss with no radiation or known zone) ====
+        -- Catches dynamic anomalies or any zone not yet in db.zone_by_name
         local prev_hp = npc_prev_hp[npc_id]
         if prev_hp then
-            -- More than 4 % health lost in one 3-second tick from a non-radiation source
-            -- → NPC is inside an anomaly field; make them flee immediately
-            if (hp - prev_hp) < -0.04 and rad < 0.08 then
+            if (hp - prev_hp) < -0.04 and rad < 0.08 and not inside_entry then
                 flee_squad_to_nearest_safe(npc)
-                -- Emergency heal if critical
                 if hp < 0.25 then
                     npc_use_item_section(npc, { "medkit_army", "medkit", "medkit_scientic" })
                 end
